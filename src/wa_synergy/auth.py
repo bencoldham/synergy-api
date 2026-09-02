@@ -282,7 +282,7 @@ def _mint_with_playwright(
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
-        page.on("request", observed.observe)
+        page.on("request", lambda request: observed.observe(request))
         page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=_STATE_TIMEOUT_MS)
 
         initial_state = _wait_for_state(

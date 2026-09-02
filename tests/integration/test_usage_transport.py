@@ -8,7 +8,7 @@ import httpx
 from wa_synergy.auth import _AuthenticationResult
 from wa_synergy.errors import AuthenticationContractError, UsageFetchError
 from wa_synergy.models import UsageQuery
-from wa_synergy.usage import create_http_client, fetch_usage
+from wa_synergy.usage import _AuthenticationLost, create_http_client, fetch_usage
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "usage" / "valid.json"
 _USAGE_RESPONSE = _FIXTURE.read_text(encoding="utf-8")
@@ -272,6 +272,98 @@ class DirectAuraTransportTests(unittest.TestCase):
             )
         self.assertNotIn(secret_body, str(raised.exception))
         self.assertIn("HTTP 429", str(raised.exception))
+
+    def test_captured_authentication_loss_signatures_are_internal_signals(self) -> None:
+        invalid_session = json.dumps(
+            {
+                "actions": [
+                    {
+                        "id": "1;a",
+                        "state": "SUCCESS",
+                        "returnValue": {
+                            "returnValue": json.dumps(
+                                {
+                                    "IPResult": {
+                                        "success": False,
+                                        "error": (
+                                            "You do not have access to the Apex class "
+                                            "named 'BusinessProcessDisplayController'."
+                                        ),
+                                    }
+                                }
+                            )
+                        },
+                    }
+                ]
+            }
+        )
+        responses = (
+            httpx.Response(401),
+            httpx.Response(302, headers={"Location": "/s/login/"}),
+            httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                text=(
+                    '<a href="/s/login/">Log in</a>'
+                    '<input name="Email"><input name="Password">'
+                ),
+            ),
+            httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                text="invalid-aura-token",
+            ),
+            httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                text=invalid_session,
+            ),
+        )
+        query = UsageQuery(
+            start="2026-07-01",
+            end="2026-07-02",
+            account_ids=(_ACCOUNT_ID,),
+            service_point_ids=(_SERVICE_POINT_ID,),
+        )
+
+        for response in responses:
+            with (
+                self.subTest(status=response.status_code, body=response.text[:20]),
+                create_http_client(
+                    _authentication(),
+                    transport=httpx.MockTransport(
+                        lambda _request, captured=response: captured
+                    ),
+                ) as client,
+                self.assertRaises(_AuthenticationLost),
+            ):
+                fetch_usage(client, _authentication(), query)
+
+    def test_ordinary_forbidden_response_does_not_signal_session_expiry(self) -> None:
+        authentication = _authentication()
+        with (
+            create_http_client(
+                authentication,
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(
+                        403,
+                        headers={"Content-Type": "application/json"},
+                        json={"error": "forbidden"},
+                    )
+                ),
+            ) as client,
+            self.assertRaisesRegex(UsageFetchError, "HTTP 403"),
+        ):
+            fetch_usage(
+                client,
+                authentication,
+                UsageQuery(
+                    start="2026-07-01",
+                    end="2026-07-02",
+                    account_ids=(_ACCOUNT_ID,),
+                    service_point_ids=(_SERVICE_POINT_ID,),
+                ),
+            )
 
 
 if __name__ == "__main__":

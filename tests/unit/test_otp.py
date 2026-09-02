@@ -172,11 +172,16 @@ class OtpTests(unittest.TestCase):
 
     def test_uses_fixed_verified_tls_read_only_inbox_and_logs_out(self) -> None:
         fake = FakeImap()
-        with patch("wa_synergy.otp.imaplib.IMAP4_SSL", return_value=fake) as constructor:
-            with gmail_otp_mailbox(self.credentials) as mailbox:
-                self.assertEqual((mailbox.uid_validity, mailbox.uid_next), (42, 8))
-                self.assertIsNotNone(mailbox.authentication_started_at.tzinfo)
-                self.assertNotIn(self.gmail_password, repr(mailbox))
+        with (
+            patch(
+                "wa_synergy.otp.imaplib.IMAP4_SSL",
+                return_value=fake,
+            ) as constructor,
+            gmail_otp_mailbox(self.credentials) as mailbox,
+        ):
+            self.assertEqual((mailbox.uid_validity, mailbox.uid_next), (42, 8))
+            self.assertIsNotNone(mailbox.authentication_started_at.tzinfo)
+            self.assertNotIn(self.gmail_password, repr(mailbox))
 
         constructor.assert_called_once()
         args, kwargs = constructor.call_args
@@ -299,9 +304,9 @@ class OtpTests(unittest.TestCase):
         with (
             patch("wa_synergy.otp.imaplib.IMAP4_SSL", return_value=fake),
             self.assertRaises(OtpMailboxError) as raised,
+            gmail_otp_mailbox(self.credentials),
         ):
-            with gmail_otp_mailbox(self.credentials):
-                self.fail("mailbox context unexpectedly opened")
+            self.fail("mailbox context unexpectedly opened")
 
         self.assertEqual(
             str(raised.exception),
@@ -325,9 +330,12 @@ class OtpTests(unittest.TestCase):
                     patcher = patch(
                         "wa_synergy.otp.imaplib.IMAP4_SSL", side_effect=failure
                     )
-                with patcher, self.assertRaises(OtpMailboxError) as raised:
-                    with gmail_otp_mailbox(self.credentials):
-                        self.fail("mailbox context unexpectedly opened")
+                with (
+                    patcher,
+                    self.assertRaises(OtpMailboxError) as raised,
+                    gmail_otp_mailbox(self.credentials),
+                ):
+                    self.fail("mailbox context unexpectedly opened")
                 self.assertNotIn("synthetic", str(raised.exception))
 
     def test_uidvalidity_change_fails_instead_of_using_a_new_mailbox(self) -> None:

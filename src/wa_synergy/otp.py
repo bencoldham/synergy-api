@@ -11,7 +11,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email import policy
-from email.message import Message
+from email.message import EmailMessage
 from email.parser import BytesParser
 from email.utils import parseaddr
 from html.parser import HTMLParser
@@ -225,7 +225,7 @@ def _fetch_message_bytes(
     return _fetched_bytes(_uid_call(connection, "fetch", str(uid), query))
 
 
-def _parse_email(document: bytes, *, candidate: bool) -> Message:
+def _parse_email(document: bytes, *, candidate: bool) -> EmailMessage:
     try:
         message = BytesParser(policy=policy.default).parsebytes(document)
     except (UnicodeError, ValueError, TypeError):
@@ -237,7 +237,7 @@ def _parse_email(document: bytes, *, candidate: bool) -> Message:
     return message
 
 
-def _is_expected_message(message: Message) -> bool:
+def _is_expected_message(message: EmailMessage) -> bool:
     sender_name, sender_address = parseaddr(str(message.get("From", "")))
     subject = str(message.get("Subject", ""))
     return (
@@ -265,7 +265,7 @@ def _codes_in_text(document: str) -> set[str]:
     }
 
 
-def _extract_otp(message: Message) -> str:
+def _extract_otp(message: EmailMessage) -> str:
     codes: set[str] = set()
     parts = message.walk() if message.is_multipart() else (message,)
     try:

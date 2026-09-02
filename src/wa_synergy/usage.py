@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, NoReturn, cast
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -42,6 +43,76 @@ _INTEGRATION_PROCEDURE_SERVICE = "vlocity_cmt.IntegrationProcedureService"
 _CHART_PROCEDURE = "MyAccount_ChartData"
 _DISCOVERY_CONTROLLER = "CommunityServiceController"
 _DISCOVERY_METHOD = "getLinkedServices"
+
+_LOGIN_PATH = "/s/login"
+
+
+class _AuthenticationLost(Exception):
+    """Known direct-Aura signal that requires one credential remint."""
+
+
+def _is_login_redirect(response: httpx.Response) -> bool:
+    if not 300 <= response.status_code < 400:
+        return False
+    location = response.headers.get("location")
+    if not location:
+        return False
+    return cast(str, urlsplit(location).path).rstrip("/") == _LOGIN_PATH
+
+
+def _is_login_html(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "")
+    if content_type.partition(";")[0].strip().lower() != "text/html":
+        return False
+    document = response.text.casefold()
+    return (
+        "/s/login/" in document
+        and "email" in document
+        and "password" in document
+        and "log in" in document
+    )
+
+
+def _is_invalid_session_payload(response_text: str, *, controller: str) -> bool:
+    controller_name = controller.rpartition(".")[2]
+    try:
+        envelope = json.loads(response_text)
+        if not isinstance(envelope, dict):
+            return False
+        actions = envelope.get("actions")
+        if not isinstance(actions, list) or len(actions) != 1:
+            return False
+        action = actions[0]
+        if not isinstance(action, dict) or action.get("state") != "SUCCESS":
+            return False
+        return_value = action.get("returnValue")
+        if not isinstance(return_value, dict):
+            return False
+        nested_document = return_value.get("returnValue")
+        if not isinstance(nested_document, str):
+            return False
+        nested = json.loads(nested_document)
+        if not isinstance(nested, dict):
+            return False
+        ip_result = nested.get("IPResult")
+        if not isinstance(ip_result, dict) or set(ip_result) != {"success", "error"}:
+            return False
+        if ip_result.get("success") not in {False, "false"}:
+            return False
+        error = ip_result.get("error")
+        if not isinstance(error, str):
+            return False
+        escaped_class = re.escape(controller_name)
+        return (
+            re.fullmatch(
+                rf"You do not have access to the Apex class named "
+                rf"['\"]?(?:vlocity_cmt\.)?{escaped_class}['\"]?\.?",
+                error.strip(),
+            )
+            is not None
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
 
 
 def _reject_json_constant(_value: str) -> NoReturn:
@@ -370,6 +441,11 @@ def create_http_client(
     """Create a memory-only direct client containing only the captured ``sid`` cookie."""
 
     _require_closed_authentication(authentication)
+    hostname = urlsplit(_PORTAL_ORIGIN).hostname
+    if hostname is None:
+        raise AuthenticationContractError(
+            "Direct HTTP portal origin does not contain a hostname"
+        )
     client = httpx.Client(
         base_url=_PORTAL_ORIGIN,
         follow_redirects=False,
@@ -381,7 +457,7 @@ def create_http_client(
     client.cookies.set(
         "sid",
         authentication.sid,
-        domain="my.synergy.net.au",
+        domain=hostname,
         path="/",
     )
     return client
@@ -439,6 +515,7 @@ def _post_aura(
     *,
     message: str,
     state: str,
+    controller: str,
 ) -> str:
     _require_closed_authentication(authentication)
     try:
@@ -454,15 +531,31 @@ def _post_aura(
     except httpx.HTTPError:
         raise UsageFetchError(f"Synergy {state} request failed") from None
 
+    if response.status_code == 401 or _is_login_redirect(response):
+        raise _AuthenticationLost
+    invalid_session = _is_invalid_session_payload(
+        response.text,
+        controller=controller,
+    )
+    if response.status_code == 403 and invalid_session:
+        raise _AuthenticationLost
     if response.status_code != 200:
         raise UsageFetchError(
             f"Synergy {state} request failed with HTTP {response.status_code}"
         )
+    if _is_login_html(response):
+        raise _AuthenticationLost
     content_type = response.headers.get("content-type", "")
     if content_type.partition(";")[0].strip().lower() != "application/json":
         raise UsageValidationError(
             f"Synergy {state} response is not an Aura JSON document"
         )
+    try:
+        json.loads(response.text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        raise _AuthenticationLost from None
+    if invalid_session:
+        raise _AuthenticationLost
     return response.text
 
 
@@ -529,6 +622,7 @@ def discover_services(
             parameters={},
         ),
         state="service discovery",
+        controller=_DISCOVERY_CONTROLLER,
     )
     return _decode_discovery_response(response_text)
 
@@ -590,6 +684,7 @@ def fetch_usage(
                 query=query,
             ),
             state="usage",
+            controller=_USAGE_CONTROLLER,
         )
         intervals.extend(
             normalize_usage_response(

@@ -6,6 +6,7 @@ import os
 import sqlite3
 import stat
 from collections.abc import Iterable
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -298,10 +299,8 @@ def upsert_usage_intervals(
         )
     except sqlite3.Error as exc:
         if connection is not None:
-            try:
+            with suppress(sqlite3.Error):
                 connection.rollback()
-            except sqlite3.Error:
-                pass
         raise StorageError("normalized usage could not be stored in SQLite") from exc
     finally:
         if connection is not None:

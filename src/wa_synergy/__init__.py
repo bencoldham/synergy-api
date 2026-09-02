@@ -1,5 +1,6 @@
 """Public API for the WA Synergy client package."""
 
+from .client import SynergyClient
 from .config import SynergyCredentials
 from .errors import (
     AuthenticationContractError,
@@ -22,6 +23,7 @@ from .errors import (
     UsageValidationError,
 )
 from .models import SyncResult, UsageInterval, UsageQuery
+from .sync import sync_usage_to_db
 
 __all__ = (
     "AuthenticationContractError",
@@ -38,6 +40,7 @@ __all__ = (
     "SessionExpiredError",
     "StorageError",
     "SyncResult",
+    "SynergyClient",
     "SynergyCredentials",
     "SynergyError",
     "UnsupportedAuthChallenge",
@@ -46,4 +49,5 @@ __all__ = (
     "UsageInterval",
     "UsageQuery",
     "UsageValidationError",
+    "sync_usage_to_db",
 )
