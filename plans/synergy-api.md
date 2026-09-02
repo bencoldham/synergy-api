@@ -2,11 +2,12 @@
 
 ## Repository findings
 
-- The repository currently contains only `.gitignore`; there is no implementation or project configuration to preserve.
-- The public [Synergy My Account](https://my.synergy.net.au/) login currently redirects to `/s/login/` and loads Salesforce Experience Cloud/Aura resources.
-- An authorized capture now establishes the authenticated usage transport: usage data is returned by a direct Salesforce Aura POST, and the requested date fields control the returned range. The remaining login selectors, OTP format, transferable session fields, response schema, account discovery, authentication-loss signatures, and any provider date limit still require sanitized capture and verification.
+- The repository contains no implementation or project configuration to preserve. The live-test credentials remain only in the ignored `.env`.
+- The public [Synergy My Account](https://my.synergy.net.au/) login redirects to `/s/login/` and loads Salesforce Experience Cloud/Aura resources.
+- Implementation step 1 was executed against the authorized dedicated Gmail/Synergy account on 2026-08-08. The direct discovery and usage contracts, OTP mail pattern, transferable session fields, response schema, range behavior, header/input minimization, and authentication-loss signatures below are sanitized observations.
+- A fresh automated login reached the provider's CAPTCHA Integration Procedure and was rejected before primary authentication or OTP. CAPTCHA was not bypassed. This leaves the OTP-page selectors, a current successful browser-login sequence, and the no-OTP branch unresolved.
 
-No implementation was performed.
+No package implementation was performed.
 
 ## Email provider decision
 
@@ -83,18 +84,49 @@ Use a synchronous Python client with a strict browser-to-HTTP authentication han
 
 ### Observed direct Aura usage contract
 
-The supplied authenticated request establishes this initial contract; all real identifiers and credential values from that request are secrets and must not be copied into source, fixtures, tests, or documentation:
+The 2026-08-08 authorized capture establishes this sanitized contract. All real identifiers, credential values, OTPs, cookies, tokens, Aura contexts, addresses, and usage values were kept in memory and were not copied into the repository:
 
-- Send `POST https://my.synergy.net.au/s/sfsites/aura` with query parameter `aura.ApexAction.execute=1`. Determine through sanitized capture whether the observed `r` query value is required or merely a request sequence/cache buster; never hard-code its captured value.
-- Use `application/x-www-form-urlencoded;charset=UTF-8` with form fields `message`, `aura.context`, `aura.pageURI`, and `aura.token`.
-- `message` is JSON containing the `aura://ApexActionController/ACTION$execute` action for `vlocity_cmt.BusinessProcessDisplayController.GenericInvoke2NoCont`. Its nested Integration Procedure call uses `vlocity_cmt.IntegrationProcedureService`, method `MyAccount_ChartData`, and a JSON-string `input`.
-- The nested input carries `ServiceId`, `IntervalType="DAILY"`, `ChartType="INTERVAL_DATA"`, `DisplayOptionValue="Daily"`, and the requested dates.
-- Set `StartDate`/`EndDate` as `YYYYMMDD` and `PeriodStartDate`/`PeriodEndDate` as `YYYY-MM-DD`. Contract tests must confirm the provider endpoints are inclusive; when confirmed, map public `[start, end)` to provider start and `end - 1 day`. A single-day query therefore repeats the same calendar date in all four fields.
-- Changing those four request-date fields changes how much usage data is returned. Prefer one direct request for the whole caller range; add date chunking only if capture proves a maximum range.
-- Do not treat observed `UnbilledStartDate` or `UnbilledEndDate` as query controls. Determine whether they are required session/account metadata, can be omitted, or must be populated from a separate direct discovery response.
-- Transfer only headers proven necessary. Expected candidates are `Origin`, the service-usage `Referer`, `X-SFDC-LDS-Endpoints`, and a current `X-SFDC-Page-Scope-Id`; browser-generated trace IDs, request IDs, fetch-priority headers, compression lists, connection headers, and the captured User-Agent must not be hard-coded unless request minimization proves one is required.
-- `aura.context`, `aura.token`, page scope, cookies, and any framework fingerprint are dynamic session material produced during authentication. Never embed captured examples.
-- Account/service-point discovery must also use direct HTTP after credential handoff. It must not silently reuse the captured service ID or navigate the browser to retrieve usage.
+#### Direct request and session handoff
+
+- Send `POST https://my.synergy.net.au/s/sfsites/aura` as `application/x-www-form-urlencoded;charset=UTF-8`. The captured `r` query value is unnecessary. Removing `aura.ApexAction.execute=1` separately also preserved the response, but removing both query fields together was not tested; retain `aura.ApexAction.execute=1` and omit `r`.
+- The browser form contains `message`, `aura.context`, `aura.pageURI`, and `aura.token`. `message`, `aura.context`, and the dynamic `aura.token` are required. `aura.pageURI` was individually removable.
+- Transfer only the Salesforce `sid` cookie. A direct request with only `sid` plus `Content-Type` succeeded after the Playwright page was closed. Omitting `sid` failed. `sid_Client`, consent, analytics, advertising, Google, page-scope, LDS, `Origin`, `Referer`, browser-identification, trace, and request-ID values are unnecessary.
+- The captured Aura context contains the dynamic keys `mode`, `fwuid`, `app`, `loaded`, `dn`, `globals`, and `uad`. Do not persist or synthesize their values.
+- The Aura action descriptor is `aura://ApexActionController/ACTION$execute`, invoking `vlocity_cmt.BusinessProcessDisplayController.GenericInvoke2NoCont` with `cacheable=false` and `isContinuation=false`.
+- Its nested parameters are `input`, `options="{}"`, `sClassName="vlocity_cmt.IntegrationProcedureService"`, and `sMethodName="MyAccount_ChartData"`. Removing any of `options`, `sClassName`, or `sMethodName` prevented a usable Integration Procedure result.
+
+#### Usage input and returned range
+
+- Use `IntervalType="DAILY"` and `ChartType="INTERVAL_DATA"` to retrieve 30-minute records. Require `ServiceId`, `StartDate`, `EndDate`, and `Device=[]`. Omitting `ServiceId` or `Device` produced no daily records; omitting `EndDate` also produced no records, while omitting `StartDate` over-fetched from the service's first available day.
+- `StartDate` and `EndDate`, formatted as `YYYYMMDD`, are the actual inclusive query controls. One date returned 48 half-hour records, two dates returned 96, seven returned 336, and 31 returned 1,488. Map public `[start, end)` to provider `StartDate=start` and `EndDate=end - 1 day`.
+- `PeriodStartDate` and `PeriodEndDate` did not change the returned range when varied independently and were individually removable. `UnbilledStartDate` and `UnbilledEndDate` were also removable and are not query controls.
+- `Daily`, `Monthly`, `PreviousMeters`, `UnbilledStartDate`, `UnbilledEndDate`, and `AmiMeterCount` were removable together. `Interval` and `DisplayOptionValue` were individually removable. Keep the minimum required fields above rather than copying browser-state fields.
+- Requests spanning 92, 366, and 732 inclusive calendar days succeeded in one response with no cursor, page, next, or total field. The account contained only 164 available days for the two longest probes, so no limit was observed but a provider maximum beyond 164 available days is not yet proven.
+
+#### Sanitized usage schema
+
+- Decode the Aura envelope's `actions[0].returnValue.returnValue` as a second JSON document. It contains `IPResult`, whose observed keys are `ChartData`, `ChartType`, `IntervalType`, and `Total_Cost`.
+- `ChartData` contains `Devices`, `Response`, `errorCode`, and `error`. A successful response reported `errorCode="INVOKE-200"` and `error="OK"`.
+- Each `Response` row contains string fields `BillingStatus`, `VAL_DAY`, `VAL_TIME`, `VAL_SOLAR`, and exactly one observed import-tariff field: `OFF_PEAK`, `SUPER_OFFPEAK`, or `PEAK`. Unknown future tariff fields must be treated as provider schema, not silently folded into an existing channel.
+- `VAL_DAY` is `YYYY-MM-DD`; `VAL_TIME` runs from `0000` through `2330` in 30-minute steps. The observed daily result had 48 unique day/time rows and no duplicate composite keys.
+- Tariff and solar quantities are decimal strings with up to three fractional digits. The portal labels the unit `(KWH)`. Do not pass these strings through binary floating point.
+- `BillingStatus="Not yet billed"` was observed. `Devices` contained 18-character alphanumeric identifiers, but rows contain no device identifier; historical range probes returned up to two device identifiers while still returning one aggregate row per day/time. Per-row meter attribution is therefore not established.
+
+#### Direct account and service discovery
+
+- Call `CommunityServiceController.getLinkedServices` through the same Aura Apex action. The captured `contactId` and `accountId` parameters were both `null`; omitting both still returned the complete result through direct HTTP after the browser closed.
+- The return object contains `ActiveServices`, `InactiveServices`, active/inactive counts, contact/user metadata, and account-link metadata. Each service includes `Id`, `value`, `Name`, `Type`, `Status`, `AccountNumber`, `ContractNumber`, `ContractAccountNumber`, `BillingAccount`, `Premises`, tariff, and address/contact fields.
+- The observed `Id` and `value` were the same 18-character service identifier. Preserve identifiers and account numbers as strings. The authorized account exposed one active electricity service and no inactive services; multi-service iteration is supported by the array shape but was not exercised.
+
+#### Login, Gmail OTP, and authentication loss
+
+- Stable initial controls are textboxes named `Email` and `Password` and a button named `Log in` at `/s/login/`. An authenticated session exposed `/s/service-dashboard`, a `Welcome, …` button, and a `Switch account` button.
+- Gmail TLS IMAP authentication to fixed `imap.gmail.com:993` succeeded. The dedicated mailbox's prior Synergy OTPs were present in `INBOX`; no Spam filter is needed for the observed account.
+- The exact OTP allowlist is sender `info@synergy.net.au` with display name `Synergy` and subject `Your Synergy online one-time passcode`. Captured messages are UTF-8, `multipart/alternative`, with `text/plain` and `text/html` parts using `8bit` transfer encoding. The OTP is one standalone six-digit line in plain text and the same single code appears in both parts. `BODY.PEEK` left both messages unread.
+- A fresh login invoked Integration Procedure `MyAccount_Captcha` before primary authentication. It returned `IPResult.error=true`, showed `Sorry, Please refresh the page and try again.`, and sent no message at or above the captured Gmail `UIDNEXT`. Do not bypass this challenge; raise `UnsupportedAuthChallenge`.
+- Missing or invalid `sid` returned HTTP 200 Aura JSON with action state `SUCCESS`, but `IPResult` contained only `success`/`error`, no `ChartData`, and a stable access-denied-to-Apex-class message. Treat that exact shape/message combination as the captured invalid-session signature, not any arbitrary permission error.
+- Unauthenticated protected dashboard and usage GETs returned HTTP 200 login HTML at the requested route rather than a redirect. Missing or invalid `aura.token` returned HTTP 200 with `application/json` but a non-JSON body. These are authentication-loss/contract signals only in the corresponding expected-Aura context.
+- HTTP 401, 403 invalid-session, login redirects, a successful fresh OTP challenge, OTP submission selectors, and a successful login without OTP were not observed.
 
 ## Proposed file structure
 
