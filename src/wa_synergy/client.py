@@ -9,23 +9,13 @@ import httpx
 
 from .auth import _AuthenticationResult, mint_http_credentials
 from .config import SynergyCredentials
-from .errors import ConfigurationError, SessionExpiredError, UsageFetchError
+from .errors import ConfigurationError, UsageFetchError
 from .models import UsageInterval, UsageQuery
-from .usage import (
-    _AuthenticationLost,
-    create_http_client,
-    fetch_usage,
-)
+from .usage import create_http_client, fetch_usage
 
 
 class SynergyClient:
-    """Synchronous Synergy client with memory-only direct-HTTP credentials.
-
-    Public operations are serialized because an Aura token, its context, and the
-    corresponding ``sid`` cookie form one mutable provider session. Authentication uses
-    Playwright only while minting that material; usage always travels through the owned
-    :class:`httpx.Client` after the browser has closed.
-    """
+    """Log in once, then use one direct HTTP session for usage calls."""
 
     __slots__ = (
         "_authentication",
@@ -96,26 +86,14 @@ class SynergyClient:
         return client, authentication
 
     def get_usage(self, query: UsageQuery) -> tuple[UsageInterval, ...]:
-        """Fetch a complete normalized range, reminting credentials at most once."""
+        """Fetch usage with the token captured during login."""
 
         if not isinstance(query, UsageQuery):
             raise ConfigurationError("get_usage requires a UsageQuery")
         with self._operation_lock:
             self._require_open()
             client, authentication = self._current_http_session()
-            try:
-                return fetch_usage(client, authentication, query)
-            except _AuthenticationLost:
-                self._discard_http_session()
-
-            client, authentication = self._current_http_session()
-            try:
-                return fetch_usage(client, authentication, query)
-            except _AuthenticationLost:
-                self._discard_http_session()
-                raise SessionExpiredError(
-                    "Synergy direct HTTP session remained invalid after refresh"
-                ) from None
+            return fetch_usage(client, authentication, query)
 
     def close(self) -> None:
         """Close and discard all direct-HTTP state; repeated calls are harmless."""

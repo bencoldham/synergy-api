@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import re
+import secrets
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from enum import Enum, auto
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import (
@@ -25,16 +25,12 @@ from playwright.sync_api import (
 from playwright.sync_api import (
     Error as PlaywrightError,
 )
-from playwright.sync_api import (
-    TimeoutError as PlaywrightTimeoutError,
-)
-from playwright_stealth import Stealth
+from playwright_stealth import Stealth  # type: ignore[import-untyped]
 
 from .config import SynergyCredentials
 from .errors import (
     AuthenticationContractError,
     AuthenticationError,
-    AuthenticationTransportError,
     OtpRejectedError,
     UnsupportedAuthChallenge,
 )
@@ -47,14 +43,9 @@ _DASHBOARD_PATH = "/s/service-dashboard"
 _STATE_TIMEOUT_MS = 30_000
 _STATE_POLL_MS = 100
 _LOGIN_RETRY_STABILITY_MS = 2_000
-_INTERACTIVE_STATE_TIMEOUT_MS = 120_000
-_AUTH_MATERIAL_TIMEOUT_MS = 5_000
+_AUTH_MATERIAL_TIMEOUT_MS = 30_000
 _AURA_CONTEXT_KEYS = frozenset(
     {"mode", "fwuid", "app", "loaded", "dn", "globals", "uad"}
-)
-_OTP_NAME = re.compile(
-    r"^(?:one[- ]time(?: passcode)?|passcode|verification code|security code|otp)$",
-    re.IGNORECASE,
 )
 _OTP_SUBMIT_NAME = re.compile(r"^(?:verify|submit|continue)$", re.IGNORECASE)
 _WELCOME_NAME = re.compile(r"^Welcome,", re.IGNORECASE)
@@ -82,6 +73,7 @@ class _AuthenticationResult:
     sid: str = field(repr=False)
     aura_token: str = field(repr=False)
     aura_context: str = field(repr=False)
+    service_id: str
     browser_closed: bool = field(default=False, repr=False)
 
 
@@ -93,26 +85,23 @@ class _ObservedAuraCredentials:
     def observe(self, request: Request, *, page_url: str) -> None:
         """Retain credentials only from dashboard-originated Aura form requests."""
 
-        try:
-            if urlsplit(page_url).path.rstrip("/") != _DASHBOARD_PATH:
-                return
-            parsed_url = urlsplit(request.url)
-            if (
-                request.method != "POST"
-                or parsed_url.scheme != "https"
-                or parsed_url.hostname != "my.synergy.net.au"
-                or parsed_url.path != _AURA_PATH
-                or request.post_data is None
-            ):
-                return
-            fields = parse_qs(request.post_data, keep_blank_values=True)
-            tokens = fields.get("aura.token", [])
-            contexts = fields.get("aura.context", [])
-            if len(tokens) == 1 and len(contexts) == 1:
-                self.aura_token = tokens[0]
-                self.aura_context = contexts[0]
-        except (AttributeError, TypeError, UnicodeError, ValueError):
+        if urlsplit(page_url).path.rstrip("/") != _DASHBOARD_PATH:
             return
+        parsed_url = urlsplit(request.url)
+        if (
+            request.method != "POST"
+            or parsed_url.scheme != "https"
+            or parsed_url.hostname != "my.synergy.net.au"
+            or parsed_url.path != _AURA_PATH
+            or request.post_data is None
+        ):
+            return
+        fields = parse_qs(request.post_data, keep_blank_values=True)
+        tokens = fields.get("aura.token", [])
+        contexts = fields.get("aura.context", [])
+        if len(tokens) == 1 and len(contexts) == 1:
+            self.aura_token = tokens[0]
+            self.aura_context = contexts[0]
 
 
 class _AuthState(Enum):
@@ -179,6 +168,7 @@ def _detect_state(page: Page, *, include_login: bool) -> _AuthState | None:
         return _AuthState.LOGIN
     return None
 
+
 def _wait_for_state(
     page: Page,
     allowed: frozenset[_AuthState],
@@ -195,8 +185,9 @@ def _wait_for_state(
             return state
         remaining_ms = int((deadline - time.monotonic()) * 1_000)
         if remaining_ms <= 0:
+            expected = ", ".join(sorted(state.name for state in allowed))
             raise AuthenticationContractError(
-                "Synergy authentication reached an unknown portal state"
+                f"Timed out at {page.url!r}; expected Synergy state: {expected}"
             )
         page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
 
@@ -228,7 +219,8 @@ def _wait_for_login_retry_ready(page: Page) -> _AuthState:
         remaining_ms = int((deadline - now) * 1_000)
         if remaining_ms <= 0:
             raise AuthenticationContractError(
-                "Synergy login did not become ready for one bounded retry"
+                f"Synergy login retry never became actionable at {page.url!r}; "
+                f"last detected state: {state.name if state is not None else 'unknown'}"
             )
         page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
 
@@ -350,26 +342,11 @@ def _valid_aura_material(token: str | None, context: str | None) -> bool:
     return isinstance(decoded, dict) and decoded.keys() >= _AURA_CONTEXT_KEYS
 
 
-def _dom_aura_material(page: Page) -> tuple[str, str] | None:
-    token_input = page.locator('input[name="aura.token"]')
-    context_input = page.locator('input[name="aura.context"]')
-    if token_input.count() == 0 or context_input.count() == 0:
-        return None
-    token = token_input.first.input_value()
-    context = context_input.first.input_value()
-    if _valid_aura_material(token, context):
-        return token, context
-    return None
-
-
 def _wait_for_aura_material(
     page: Page, observed: _ObservedAuraCredentials
 ) -> tuple[str, str]:
     deadline = time.monotonic() + (_AUTH_MATERIAL_TIMEOUT_MS / 1_000)
     while True:
-        dom_material = _dom_aura_material(page)
-        if dom_material is not None:
-            return dom_material
         if _valid_aura_material(observed.aura_token, observed.aura_context):
             assert observed.aura_token is not None
             assert observed.aura_context is not None
@@ -377,7 +354,9 @@ def _wait_for_aura_material(
         remaining_ms = int((deadline - time.monotonic()) * 1_000)
         if remaining_ms <= 0:
             raise AuthenticationContractError(
-                "Synergy did not expose the required Aura credentials"
+                f"Authenticated page {page.url!r} did not issue a dashboard Aura "
+                f"request with valid credentials within "
+                f"{_AUTH_MATERIAL_TIMEOUT_MS} ms"
             )
         page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
 
@@ -390,7 +369,8 @@ def _sid_cookie(context: BrowserContext) -> str:
             values.add(value)
     if len(values) != 1:
         raise AuthenticationContractError(
-            "Synergy did not expose one transferable session cookie"
+            f"Expected one non-empty sid cookie for {_PORTAL_ORIGIN}, "
+            f"found {len(values)}"
         )
     return values.pop()
 
@@ -401,11 +381,19 @@ def _authentication_result(
     observed: _ObservedAuraCredentials,
 ) -> _AuthenticationResult:
     token, aura_context = _wait_for_aura_material(page, observed)
+    service_ids = parse_qs(urlsplit(page.url).query).get("c__service", [])
+    if len(service_ids) != 1 or not service_ids[0]:
+        raise AuthenticationContractError(
+            f"Authenticated dashboard URL has no single c__service value: {page.url!r}"
+        )
     return _AuthenticationResult(
         sid=_sid_cookie(context),
         aura_token=token,
         aura_context=aura_context,
+        service_id=service_ids[0],
     )
+
+
 def _browser_profile_path() -> Path:
     cache_root = os.environ.get("XDG_CACHE_HOME")
     root = Path(cache_root) if cache_root else Path.home() / ".cache"
@@ -413,8 +401,6 @@ def _browser_profile_path() -> Path:
     profile.mkdir(mode=0o700, parents=True, exist_ok=True)
     profile.chmod(0o700)
     return profile
-
-
 
 
 def _close_browser(
@@ -451,7 +437,7 @@ def _mint_with_playwright(
                 launch_args.append("--ozone-platform=wayland")
             context = playwright.chromium.launch_persistent_context(
                 str(_browser_profile_path()),
-                #channel="chrome", # bluefin patch
+                # channel="chrome", # bluefin patch
                 headless=False,
                 args=launch_args,
                 locale="en-AU",
@@ -535,7 +521,20 @@ def _mint_with_playwright(
                     "Synergy presented an unsupported CAPTCHA"
                 )
             if post_login_state is _AuthState.REJECTED:
-                raise AuthenticationError("Synergy rejected the supplied credentials")
+                messages = [
+                    locator.inner_text().strip()
+                    for index in range(page.get_by_text(_AUTH_FAILURE_TEXT).count())
+                    if (
+                        (
+                            locator := page.get_by_text(_AUTH_FAILURE_TEXT).nth(index)
+                        ).is_visible()
+                    )
+                    and locator.inner_text().strip()
+                ]
+                detail = " | ".join(messages) or "failure indicator was visible"
+                raise AuthenticationError(
+                    f"Synergy rejected login at {page.url!r}: {detail}"
+                )
             if post_login_state is _AuthState.OTP_METHOD:
                 _submit_otp_method(page)
                 post_login_state = _wait_for_state(
@@ -562,12 +561,13 @@ def _mint_with_playwright(
                             }
                         ),
                     )
-                except AuthenticationContractError:
+                except AuthenticationContractError as exc:
                     otp_input, otp_submit = _otp_controls(page)
                     if _is_visible(otp_input) and _is_visible(otp_submit):
                         raise OtpRejectedError(
-                            "Synergy rejected the one-time passcode"
-                        ) from None
+                            f"Synergy OTP controls remained visible after submission at "
+                            f"{page.url!r}: {exc}"
+                        ) from exc
                     raise
                 if post_otp_state is _AuthState.CAPTCHA:
                     raise UnsupportedAuthChallenge(
@@ -599,21 +599,3 @@ def mint_http_credentials(
             interactive=interactive,
         )
     return replace(result, browser_closed=True)
-    try:
-        with sync_playwright() as playwright:
-            result = _mint_with_playwright(
-                playwright,
-                credentials,
-                interactive=interactive,
-            )
-        return replace(result, browser_closed=True)
-    except (
-        AuthenticationError,
-        AuthenticationContractError,
-        UnsupportedAuthChallenge,
-    ):
-        raise
-    except (PlaywrightTimeoutError, PlaywrightError, OSError):
-        raise AuthenticationTransportError(
-            "Synergy authentication could not reach the login service"
-        ) from None

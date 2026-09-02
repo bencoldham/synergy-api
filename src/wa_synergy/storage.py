@@ -149,7 +149,7 @@ def _canonical_datetime(value: datetime, *, field: str) -> str:
     try:
         utc_value = value.astimezone(UTC)
     except (OverflowError, ValueError) as exc:
-        raise ConfigurationError(f"{field} must be a valid datetime") from exc
+        raise ConfigurationError(f"{field}={value!r} is invalid: {exc}") from exc
     return utc_value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
@@ -176,7 +176,9 @@ def _validated_path(db_path: Path) -> Path:
             if not stat.S_ISREG(mode):
                 raise ConfigurationError("db_path must identify a regular file")
     except OSError as exc:
-        raise ConfigurationError("db_path cannot be inspected safely") from exc
+        raise ConfigurationError(
+            f"Cannot inspect database path {db_path}: {exc}"
+        ) from exc
     return db_path
 
 
@@ -192,7 +194,7 @@ def _prepare_database_file(db_path: Path) -> None:
             return
         os.close(descriptor)
     except OSError as exc:
-        raise StorageError("SQLite database file could not be created") from exc
+        raise StorageError(f"Cannot create SQLite file {db_path}: {exc}") from exc
 
 
 def _initialize_schema(connection: sqlite3.Connection) -> None:
@@ -227,7 +229,7 @@ def _deduplicate(
                 raise StorageError("usage batch contains a conflicting duplicate")
             unique[interval.record_identity] = interval
     except TypeError as exc:
-        raise ConfigurationError("intervals must be an iterable of UsageInterval") from exc
+        raise ConfigurationError(f"intervals is not iterable: {exc}") from exc
     return tuple(unique.values())
 
 
@@ -245,9 +247,7 @@ def _incoming_row(
         _canonical_decimal(interval.consumption_kwh),
         interval.quality,
         (
-            _canonical_datetime(
-                interval.source_updated_at, field="source_updated_at"
-            )
+            _canonical_datetime(interval.source_updated_at, field="source_updated_at")
             if interval.source_updated_at is not None
             else None
         ),
@@ -297,11 +297,11 @@ def upsert_usage_intervals(
             updated=updated,
             unchanged=unchanged,
         )
-    except sqlite3.Error as exc:
+    except sqlite3.Error:
         if connection is not None:
             with suppress(sqlite3.Error):
                 connection.rollback()
-        raise StorageError("normalized usage could not be stored in SQLite") from exc
+        raise
     finally:
         if connection is not None:
             connection.close()

@@ -1,9 +1,4 @@
-"""Public exception hierarchy for :mod:`wa_synergy`.
-
-Exception messages must describe only the failed operation or contract state. Provider
-responses, credentials, OTPs, cookies, Aura material, and mailbox content must never be
-attached to these exceptions.
-"""
+"""Exceptions for failures that need package-specific handling."""
 
 
 class SynergyError(Exception):
@@ -18,16 +13,8 @@ class AuthenticationError(SynergyError):
     """Synergy authentication could not be completed."""
 
 
-class AuthenticationTransportError(AuthenticationError):
-    """The login service could not be reached safely."""
-
-
-class PortalContractError(SynergyError):
-    """The provider no longer matches a required, previously observed contract."""
-
-
-class AuthenticationContractError(AuthenticationError, PortalContractError):
-    """Required direct-HTTP authentication material could not be minted."""
+class AuthenticationContractError(AuthenticationError):
+    """Required login page or token material was missing."""
 
 
 class UnsupportedAuthChallenge(AuthenticationError):
@@ -52,14 +39,6 @@ class OtpParseError(OtpError):
 
 class OtpRejectedError(OtpError):
     """Synergy rejected the submitted OTP."""
-
-
-class SessionExpiredError(AuthenticationError):
-    """The direct HTTP session remained invalid after one credential refresh."""
-
-
-class AuthorizationError(SynergyError):
-    """The authenticated account cannot access the requested resource."""
 
 
 class UsageError(SynergyError):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, NoReturn, cast
@@ -16,7 +15,6 @@ import httpx
 
 from .errors import (
     AuthenticationContractError,
-    AuthorizationError,
     UsageFetchError,
     UsageValidationError,
 )
@@ -34,85 +32,14 @@ _POSSIBLE_CHANNEL = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DEVICE_ID = re.compile(r"[A-Za-z0-9]{18}\Z")
 _PORTAL_ORIGIN = "https://my.synergy.net.au"
 _AURA_PATH = "/s/sfsites/aura"
-_AURA_EXECUTE_QUERY = {"aura.ApexAction.execute": "1"}
+_AURA_EXECUTE_QUERY = {"r": "51", "aura.ApexAction.execute": "1"}
 _FORM_CONTENT_TYPE = "application/x-www-form-urlencoded;charset=UTF-8"
 _ACTION_DESCRIPTOR = "aura://ApexActionController/ACTION$execute"
-_USAGE_CONTROLLER = "vlocity_cmt.BusinessProcessDisplayController"
+_USAGE_NAMESPACE = "vlocity_cmt"
+_USAGE_CONTROLLER = "BusinessProcessDisplayController"
 _USAGE_METHOD = "GenericInvoke2NoCont"
 _INTEGRATION_PROCEDURE_SERVICE = "vlocity_cmt.IntegrationProcedureService"
 _CHART_PROCEDURE = "MyAccount_ChartData"
-_DISCOVERY_CONTROLLER = "CommunityServiceController"
-_DISCOVERY_METHOD = "getLinkedServices"
-
-_LOGIN_PATH = "/s/login"
-
-
-class _AuthenticationLost(Exception):
-    """Known direct-Aura signal that requires one credential remint."""
-
-
-def _is_login_redirect(response: httpx.Response) -> bool:
-    if not 300 <= response.status_code < 400:
-        return False
-    location = response.headers.get("location")
-    if not location:
-        return False
-    return cast(str, urlsplit(location).path).rstrip("/") == _LOGIN_PATH
-
-
-def _is_login_html(response: httpx.Response) -> bool:
-    content_type = response.headers.get("content-type", "")
-    if content_type.partition(";")[0].strip().lower() != "text/html":
-        return False
-    document = response.text.casefold()
-    return (
-        "/s/login/" in document
-        and "email" in document
-        and "password" in document
-        and "log in" in document
-    )
-
-
-def _is_invalid_session_payload(response_text: str, *, controller: str) -> bool:
-    controller_name = controller.rpartition(".")[2]
-    try:
-        envelope = json.loads(response_text)
-        if not isinstance(envelope, dict):
-            return False
-        actions = envelope.get("actions")
-        if not isinstance(actions, list) or len(actions) != 1:
-            return False
-        action = actions[0]
-        if not isinstance(action, dict) or action.get("state") != "SUCCESS":
-            return False
-        return_value = action.get("returnValue")
-        if not isinstance(return_value, dict):
-            return False
-        nested_document = return_value.get("returnValue")
-        if not isinstance(nested_document, str):
-            return False
-        nested = json.loads(nested_document)
-        if not isinstance(nested, dict):
-            return False
-        ip_result = nested.get("IPResult")
-        if not isinstance(ip_result, dict) or set(ip_result) != {"success", "error"}:
-            return False
-        if ip_result.get("success") not in {False, "false"}:
-            return False
-        error = ip_result.get("error")
-        if not isinstance(error, str):
-            return False
-        escaped_class = re.escape(controller_name)
-        return (
-            re.fullmatch(
-                rf"You do not have access to the Apex class named "
-                rf"['\"]?(?:vlocity_cmt\.)?{escaped_class}['\"]?\.?",
-                error.strip(),
-            )
-            is not None
-        )
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return False
 
 
 def _reject_json_constant(_value: str) -> NoReturn:
@@ -129,8 +56,8 @@ def _loads_decimal(document: object, *, state: str) -> object:
             parse_int=Decimal,
             parse_constant=_reject_json_constant,
         )
-    except (json.JSONDecodeError, ValueError):
-        raise UsageValidationError(f"{state} is not valid JSON") from None
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise UsageValidationError(f"{state} is not valid JSON: {exc}") from exc
 
 
 def _object(value: object, *, state: str) -> dict[str, object]:
@@ -163,10 +90,15 @@ def _decode_usage_response(response_text: str) -> dict[str, object]:
     )
     actions = envelope.get("actions")
     if not isinstance(actions, list) or len(actions) != 1:
-        raise UsageValidationError("Aura response actions must contain one action")
+        raise UsageValidationError(
+            f"Aura response expected one action, got {type(actions).__name__}: "
+            f"{actions!r}"
+        )
     action = _object(actions[0], state="Aura action")
     if action.get("state") != "SUCCESS":
-        raise UsageValidationError("Aura action state is not successful")
+        raise UsageValidationError(
+            f"Aura usage action failed with state {action.get('state')!r}: {action!r}"
+        )
     return_value = _required_object(action, "returnValue", state="Aura action")
     nested_document = return_value.get("returnValue")
     decoded = _object(
@@ -199,7 +131,9 @@ def _validate_context(
 
 def _validate_provider_unit(provider_unit: str) -> None:
     if provider_unit != _PROVIDER_UNIT:
-        raise UsageValidationError("Provider usage unit is not the captured KWH unit")
+        raise UsageValidationError(
+            f"Provider usage unit is {provider_unit!r}; expected {_PROVIDER_UNIT!r}"
+        )
 
 
 def _parse_day(value: object) -> date:
@@ -207,12 +141,14 @@ def _parse_day(value: object) -> date:
         raise UsageValidationError("Usage row VAL_DAY must be a YYYY-MM-DD string")
     try:
         parsed = date.fromisoformat(value)
-    except ValueError:
+    except ValueError as exc:
         raise UsageValidationError(
-            "Usage row VAL_DAY must be a valid YYYY-MM-DD date"
-        ) from None
+            f"Usage row VAL_DAY is not a valid YYYY-MM-DD date: {value!r}: {exc}"
+        ) from exc
     if parsed.isoformat() != value:
-        raise UsageValidationError("Usage row VAL_DAY must be a valid YYYY-MM-DD date")
+        raise UsageValidationError(
+            f"Usage row VAL_DAY is not canonical YYYY-MM-DD: {value!r}"
+        )
     return parsed
 
 
@@ -266,12 +202,21 @@ def _validate_devices(chart_data: dict[str, object]) -> None:
 
 def _validate_chart(ip_result: dict[str, object]) -> dict[str, object]:
     if ip_result.get("ChartType") != "INTERVAL_DATA":
-        raise UsageValidationError("IPResult ChartType is not INTERVAL_DATA")
-    if ip_result.get("IntervalType") != "DAILY":
-        raise UsageValidationError("IPResult IntervalType is not DAILY")
+        raise UsageValidationError(
+            f"IPResult ChartType is {ip_result.get('ChartType')!r}; "
+            f"expected 'INTERVAL_DATA'"
+        )
+    if ip_result.get("IntervalType") != "WEEK":
+        raise UsageValidationError(
+            f"IPResult IntervalType is {ip_result.get('IntervalType')!r}; "
+            f"expected 'WEEK'"
+        )
     chart_data = _required_object(ip_result, "ChartData", state="IPResult")
     if chart_data.get("errorCode") != "INVOKE-200" or chart_data.get("error") != "OK":
-        raise UsageValidationError("ChartData does not contain a successful result")
+        raise UsageValidationError(
+            f"ChartData failed: errorCode={chart_data.get('errorCode')!r}, "
+            f"error={chart_data.get('error')!r}"
+        )
     _validate_devices(chart_data)
     return chart_data
 
@@ -415,12 +360,6 @@ def normalize_usage_response(
     return merge_usage_intervals(intervals)
 
 
-@dataclass(frozen=True, slots=True)
-class _LinkedService:
-    account_id: str
-    service_point_id: str
-
-
 def _require_closed_authentication(authentication: _AuthenticationResult) -> None:
     if (
         not getattr(authentication, "browser_closed", False)
@@ -468,12 +407,14 @@ def _apex_action_message(
     controller: str,
     method: str,
     parameters: dict[str, object],
+    namespace: str = "",
 ) -> str:
     action = {
         "id": "1;a",
         "descriptor": _ACTION_DESCRIPTOR,
+        "callingDescriptor": "UNKNOWN",
         "params": {
-            "namespace": "",
+            "namespace": namespace,
             "classname": controller,
             "method": method,
             "params": parameters,
@@ -485,21 +426,32 @@ def _apex_action_message(
 
 
 def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
-    start = cast(date, query.start).strftime("%Y%m%d")
-    inclusive_end = (cast(date, query.end) - timedelta(days=1)).strftime("%Y%m%d")
+    start_date = cast(date, query.start)
+    inclusive_end_date = cast(date, query.end) - timedelta(days=1)
     procedure_input = {
-        "IntervalType": "DAILY",
-        "ChartType": "INTERVAL_DATA",
+        "StartDate": start_date.strftime("%Y%m%d"),
+        "EndDate": inclusive_end_date.strftime("%Y%m%d"),
         "ServiceId": service_point_id,
-        "StartDate": start,
-        "EndDate": inclusive_end,
-        "PeriodStartDate": start,
-        "PeriodEndDate": inclusive_end,
+        "IntervalType": "WEEK",
+        "ChartType": "INTERVAL_DATA",
+        "Interval": "",
+        "Daily": "X",
+        "Monthly": "",
+        "DisplayOptionValue": "Weekly",
         "Device": [],
+        "PeriodStartDate": start_date.isoformat(),
+        "PeriodEndDate": inclusive_end_date.isoformat(),
+        "PreviousMeters": [],
+        "UnbilledStartDate": start_date.isoformat(),
+        "UnbilledEndDate": inclusive_end_date.isoformat(),
+        "AmiMeterCount": 1,
+        "OtherStartDate": None,
+        "OtherEndDate": None,
     }
     return _apex_action_message(
         controller=_USAGE_CONTROLLER,
         method=_USAGE_METHOD,
+        namespace=_USAGE_NAMESPACE,
         parameters={
             "input": json.dumps(procedure_input, separators=(",", ":")),
             "options": "{}",
@@ -516,154 +468,39 @@ def _post_aura(
     message: str,
     state: str,
     controller: str,
+    method: str,
 ) -> str:
     _require_closed_authentication(authentication)
-    try:
-        response = client.post(
-            _AURA_PATH,
-            params=_AURA_EXECUTE_QUERY,
-            data={
-                "message": message,
-                "aura.context": authentication.aura_context,
-                "aura.token": authentication.aura_token,
-            },
-        )
-    except httpx.HTTPError:
-        raise UsageFetchError(f"Synergy {state} request failed") from None
-
-    if response.status_code == 401 or _is_login_redirect(response):
-        raise _AuthenticationLost
-    invalid_session = _is_invalid_session_payload(
-        response.text,
-        controller=controller,
+    response = client.post(
+        _AURA_PATH,
+        params=_AURA_EXECUTE_QUERY,
+        headers={
+            "X-SFDC-LDS-Endpoints": (
+                f"ApexActionController.execute:{controller}.{method}"
+            )
+        },
+        data={
+            "message": message,
+            "aura.context": authentication.aura_context,
+            "aura.token": authentication.aura_token,
+        },
     )
-    if response.status_code == 403 and invalid_session:
-        raise _AuthenticationLost
-    if response.status_code != 200:
-        raise UsageFetchError(
-            f"Synergy {state} request failed with HTTP {response.status_code}"
-        )
-    if _is_login_html(response):
-        raise _AuthenticationLost
+
+    response.raise_for_status()
     content_type = response.headers.get("content-type", "")
     if content_type.partition(";")[0].strip().lower() != "application/json":
         raise UsageValidationError(
-            f"Synergy {state} response is not an Aura JSON document"
+            f"Synergy {state} response has content type {content_type!r}, "
+            f"expected application/json; body: {response.text!r}"
         )
     try:
         json.loads(response.text)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        raise _AuthenticationLost from None
-    if invalid_session:
-        raise _AuthenticationLost
+    except json.JSONDecodeError as exc:
+        raise UsageFetchError(
+            f"Synergy {state} response was not valid JSON: {exc}; "
+            f"body: {response.text!r}"
+        ) from exc
     return response.text
-
-
-def _decode_discovery_response(response_text: str) -> tuple[_LinkedService, ...]:
-    envelope = _object(
-        _loads_decimal(response_text, state="Aura discovery response"),
-        state="Aura discovery response",
-    )
-    actions = envelope.get("actions")
-    if not isinstance(actions, list) or len(actions) != 1:
-        raise UsageValidationError(
-            "Aura discovery response actions must contain one action"
-        )
-    action = _object(actions[0], state="Aura discovery action")
-    if action.get("state") != "SUCCESS":
-        raise UsageValidationError("Aura discovery action state is not successful")
-    wrapper = _required_object(action, "returnValue", state="Aura discovery action")
-    result = _required_object(
-        wrapper,
-        "returnValue",
-        state="Aura discovery result wrapper",
-    )
-    active_services = result.get("ActiveServices")
-    if not isinstance(active_services, list):
-        raise UsageValidationError("Aura discovery ActiveServices must be a list")
-
-    services: dict[str, _LinkedService] = {}
-    for value in active_services:
-        service = _object(value, state="Aura discovery service")
-        service_point_id = _required_string(
-            service,
-            "Id",
-            state="Aura discovery service",
-        )
-        if service.get("value") != service_point_id:
-            raise UsageValidationError("Aura discovery service Id and value must match")
-        linked = _LinkedService(
-            account_id=_required_string(
-                service,
-                "AccountNumber",
-                state="Aura discovery service",
-            ),
-            service_point_id=service_point_id,
-        )
-        existing = services.get(service_point_id)
-        if existing is not None and existing != linked:
-            raise UsageValidationError("Aura discovery contains a conflicting service")
-        services[service_point_id] = linked
-    return tuple(
-        sorted(
-            services.values(),
-            key=lambda service: (service.account_id, service.service_point_id),
-        )
-    )
-
-
-def discover_services(
-    client: httpx.Client,
-    authentication: _AuthenticationResult,
-) -> tuple[_LinkedService, ...]:
-    """Discover every active linked service through the direct Aura endpoint."""
-
-    response_text = _post_aura(
-        client,
-        authentication,
-        message=_apex_action_message(
-            controller=_DISCOVERY_CONTROLLER,
-            method=_DISCOVERY_METHOD,
-            parameters={},
-        ),
-        state="service discovery",
-        controller=_DISCOVERY_CONTROLLER,
-    )
-    return _decode_discovery_response(response_text)
-
-
-def _services_for_query(
-    client: httpx.Client,
-    authentication: _AuthenticationResult,
-    query: UsageQuery,
-) -> tuple[_LinkedService, ...]:
-    if len(query.account_ids) == 1 and query.service_point_ids:
-        account_id = query.account_ids[0]
-        return tuple(
-            _LinkedService(account_id, service_point_id)
-            for service_point_id in query.service_point_ids
-        )
-
-    discovered = discover_services(client, authentication)
-    selected = tuple(
-        service
-        for service in discovered
-        if (not query.account_ids or service.account_id in query.account_ids)
-        and (
-            not query.service_point_ids
-            or service.service_point_id in query.service_point_ids
-        )
-    )
-    selected_accounts = {service.account_id for service in selected}
-    selected_service_points = {service.service_point_id for service in selected}
-    if (
-        set(query.account_ids) - selected_accounts
-        or set(query.service_point_ids) - selected_service_points
-    ):
-        raise AuthorizationError(
-            "Synergy discovery did not return every requested account and service"
-        )
-    return selected
 
 
 def fetch_usage(
@@ -679,24 +516,27 @@ def fetch_usage(
         raise UsageValidationError("Direct usage retrieval requires a UsageQuery")
     _require_closed_authentication(authentication)
 
-    intervals: list[UsageInterval] = []
-    for service in _services_for_query(client, authentication, query):
-        response_text = _post_aura(
-            client,
-            authentication,
-            message=_usage_action_message(
-                service_point_id=service.service_point_id,
-                query=query,
-            ),
-            state="usage",
-            controller=_USAGE_CONTROLLER,
+    service_id = authentication.service_id
+    response_text = _post_aura(
+        client,
+        authentication,
+        message=_usage_action_message(
+            service_point_id=service_id,
+            query=query,
+        ),
+        state="usage",
+        controller=_USAGE_CONTROLLER,
+        method=_USAGE_METHOD,
+    )
+    intervals = normalize_usage_response(
+        response_text,
+        account_id=service_id,
+        service_point_id=service_id,
+        query=query,
+    )
+    if not intervals:
+        raise UsageValidationError(
+            f"Synergy returned no usage intervals for service {service_id!r} "
+            f"from {query.start} to {query.end}; response: {response_text}"
         )
-        intervals.extend(
-            normalize_usage_response(
-                response_text,
-                account_id=service.account_id,
-                service_point_id=service.service_point_id,
-                query=query,
-            )
-        )
-    return merge_usage_intervals(intervals)
+    return intervals

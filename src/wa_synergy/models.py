@@ -24,10 +24,12 @@ def _query_date(value: date | str, *, field: str) -> date:
         parsed = date.fromisoformat(value)
     except ValueError as exc:
         raise ConfigurationError(
-            f"UsageQuery {field} must use YYYY-MM-DD format"
+            f"UsageQuery {field}={value!r} is not YYYY-MM-DD: {exc}"
         ) from exc
     if parsed.isoformat() != value:
-        raise ConfigurationError(f"UsageQuery {field} must use YYYY-MM-DD format")
+        raise ConfigurationError(
+            f"UsageQuery {field}={value!r} is not canonical YYYY-MM-DD"
+        )
     return parsed
 
 
@@ -40,7 +42,7 @@ def _identifier_filter(value: Iterable[str], *, field: str) -> tuple[str, ...]:
         identifiers = tuple(value)
     except TypeError as exc:
         raise ConfigurationError(
-            f"UsageQuery {field} must be a collection of identifiers"
+            f"UsageQuery {field} is not an iterable of identifiers: {exc}"
         ) from exc
     for identifier in identifiers:
         if (

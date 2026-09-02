@@ -9,10 +9,8 @@ description = "Synchronous client for retrieving normalized WA Synergy energy us
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27,<1",
-    "npx>=0.1.8",
     "playwright>=1.49,<2",
     "playwright-stealth>=2.0,<3",
-    "pytest>=9.1.1",
     "python-dotenv>=1.2.3",
 ]
 classifiers = [
@@ -29,7 +27,6 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
     "mypy>=1.13,<2",
-    "pytest>=8.3,<10",
     "ruff>=0.8,<1",
 ]
 
@@ -42,23 +39,11 @@ where = ["src"]
 [tool.setuptools.package-data]
 wa_synergy = ["py.typed"]
 
-[tool.pytest.ini_options]
-addopts = [
-    "--strict-config",
-    "--strict-markers",
-    "-ra",
-    "-m", "not live",
-]
-testpaths = ["tests"]
-pythonpath = ["src"]
-markers = [
-    "live: requires explicit opt-in and real Synergy/Gmail credentials",
-]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-src = ["src", "tests"]
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["B", "E4", "E7", "E9", "F", "I", "RUF", "SIM", "UP"]
@@ -74,6 +59,7 @@ warn_unreachable = true
 
 [tool.uv.workspace]
 members = [
+    ".",
     ".",
     ".",
     ".",
