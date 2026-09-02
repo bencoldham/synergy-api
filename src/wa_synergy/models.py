@@ -86,14 +86,23 @@ class UsageQuery:
     end: date | str
     account_ids: tuple[str, ...] = ()
     service_point_ids: tuple[str, ...] = ()
+    interval_type: str = "DAILY"
 
     def __post_init__(self) -> None:
         start = _query_date(self.start, field="start")
         end = _query_date(self.end, field="end")
         if end <= start:
             raise ConfigurationError("UsageQuery end must be later than start")
+        if not isinstance(self.interval_type, str) or self.interval_type.upper() not in (
+            "DAILY",
+            "MONTH",
+        ):
+            raise ConfigurationError(
+                f"UsageQuery interval_type must be 'DAILY' or 'MONTH', got {self.interval_type!r}"
+            )
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "end", end)
+        object.__setattr__(self, "interval_type", self.interval_type.upper())
         object.__setattr__(
             self,
             "account_ids",
@@ -104,7 +113,6 @@ class UsageQuery:
             "service_point_ids",
             _identifier_filter(self.service_point_ids, field="service_point_ids"),
         )
-
 
 @dataclass(frozen=True, slots=True)
 class UsageInterval:
