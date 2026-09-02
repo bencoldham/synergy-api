@@ -97,6 +97,12 @@ class FakeImap:
         }
         return name, [str(values[name]).encode()]
 
+    def status(self, folder: str, names: str) -> tuple[str, list[bytes]]:
+        if (folder, names) != ("INBOX", "(UIDVALIDITY)"):
+            raise AssertionError(f"unexpected status arguments: {(folder, names)!r}")
+        return "OK", [f'"INBOX" (UIDVALIDITY {self.uid_validity})'.encode()]
+
+
     def uid(self, command: str, *arguments: object) -> tuple[str, list[object]]:
         if command == "search":
             self.search_count += 1

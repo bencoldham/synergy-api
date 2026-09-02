@@ -189,13 +189,15 @@ class _PortalState:
                                 "id": "1;a",
                                 "state": "SUCCESS",
                                 "returnValue": {
-                                    "ActiveServices": [
-                                        {
-                                            "Id": _SERVICE_POINT_ID,
-                                            "value": _SERVICE_POINT_ID,
-                                            "AccountNumber": _ACCOUNT_ID,
-                                        }
-                                    ]
+                                    "returnValue": {
+                                        "ActiveServices": [
+                                            {
+                                                "Id": _SERVICE_POINT_ID,
+                                                "value": _SERVICE_POINT_ID,
+                                                "AccountNumber": _ACCOUNT_ID,
+                                            }
+                                        ]
+                                    }
                                 },
                             }
                         ]
@@ -266,7 +268,10 @@ class LocalEndToEndTests(unittest.TestCase):
                 patch("wa_synergy.auth.gmail_otp_mailbox", fake_mailbox),
                 patch("wa_synergy.auth.wait_for_otp", fake_wait_for_otp),
                 patch("wa_synergy.auth._close_browser", tracking_close),
-                SynergyClient(credentials=credentials) as client,
+                SynergyClient(
+                    credentials=credentials,
+                    interactive_auth=False,
+                ) as client,
             ):
                 first = sync_usage_to_db(
                     client=client,

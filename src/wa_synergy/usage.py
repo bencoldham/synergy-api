@@ -572,7 +572,12 @@ def _decode_discovery_response(response_text: str) -> tuple[_LinkedService, ...]
     action = _object(actions[0], state="Aura discovery action")
     if action.get("state") != "SUCCESS":
         raise UsageValidationError("Aura discovery action state is not successful")
-    result = _required_object(action, "returnValue", state="Aura discovery action")
+    wrapper = _required_object(action, "returnValue", state="Aura discovery action")
+    result = _required_object(
+        wrapper,
+        "returnValue",
+        state="Aura discovery result wrapper",
+    )
     active_services = result.get("ActiveServices")
     if not isinstance(active_services, list):
         raise UsageValidationError("Aura discovery ActiveServices must be a list")

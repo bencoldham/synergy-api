@@ -69,3 +69,6 @@ playwright/.auth/
 .auth/
 storage-state*.json
 storage_state*.json
+
+# Custom
+foo.py

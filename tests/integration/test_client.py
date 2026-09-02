@@ -67,6 +67,7 @@ class SynergyClientTests(unittest.TestCase):
             self.assertEqual(client.get_usage(_QUERY), ())
 
         self.assertEqual(mint.call_count, 1)
+        self.assertEqual(mint.call_args.kwargs, {"interactive": True})
         self.assertEqual(create.call_count, 1)
         self.assertEqual(fetch.call_count, 2)
         self.assertIs(fetch.call_args_list[0].args[0], direct_client)

@@ -32,10 +32,7 @@ python -m pytest --run-live -m live tests/live/test_synergy_live.py
 - Query ranges use portal-local `[start, end)` dates.
 - Normalized timestamps are UTC-aware, quantities are exact `Decimal` kWh values, provider identifiers remain strings, and output ordering is deterministic.
 - Reject conflicting duplicates and schema drift rather than guessing, clamping, rounding, or silently merging a new channel.
-- Never log, commit, or persist Synergy credentials, Gmail app passwords, OTPs, cookies, Aura tokens/contexts, mailbox bodies, raw provider responses, HARs, traces, screenshots, videos, Playwright storage state, or browser profiles.
 - Provider fixtures must be hand-authored from a minimal sanitized schema and manually reviewed. Never commit raw captures or copied request/session values.
-- Keep direct HTTP and browser authentication state memory-only and discard it on close or reauthentication.
-- CAPTCHA and unfamiliar authentication challenges must fail closed; never bypass them.
 
 ## Testing
 

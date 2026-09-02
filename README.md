@@ -8,6 +8,7 @@ This is an unofficial client for a provider-owned web contract. It uses Playwrig
 
 - Python 3.11 or newer
 - Chromium installed through Playwright
+- A graphical Wayland or X11 session for the default interactive authentication mode
 - A dedicated personal `@gmail.com` account used as the Synergy login address
 - Google 2-Step Verification and a Gmail app password
 - Network access to Synergy My Account and Gmail IMAP
@@ -108,15 +109,18 @@ Results are deterministic and sorted. Exact duplicates collapse; conflicting dup
 
 ## Authentication and direct transport
 
-A new `SynergyClient` has no authenticated state. Its first usage operation:
+A new `SynergyClient` has no authenticated state. By default, its first usage operation:
 
-1. opens a headless Chromium instance;
+1. opens a visible, temporary Chromium instance;
 2. opens a certificate-verified, read-only Gmail IMAP connection and records a freshness boundary;
 3. submits the Synergy credentials using the login page;
-4. reads and submits one fresh, exact-match Synergy OTP only if the portal requests one;
-5. extracts the minimum transferable Salesforce `sid`, Aura token, and Aura context;
-6. closes the page, browser context, browser, and IMAP connection; and
-7. creates an in-memory `httpx.Client` for direct account discovery and Aura usage requests.
+4. if Synergy returns its transient refresh error, reloads the page and refills the credentials so the user can physically click **Log in**;
+5. selects the email OTP method, then reads and submits one fresh, exact-match Synergy OTP;
+6. extracts the minimum transferable Salesforce `sid`, Aura token, and Aura context from the authenticated dashboard;
+7. closes the page, browser context, browser, and IMAP connection; and
+8. creates an in-memory `httpx.Client` for direct account discovery and Aura usage requests.
+
+The physical click is required when Synergy rejects browser-dispatched submissions through its CAPTCHA integration. The client does not synthesize human input or weaken browser automation detection. `SynergyClient(..., interactive_auth=False)` uses headless Chromium and a bounded automatic retry, but cannot pass a provider check that requires physical interaction.
 
 No usage request is sent through Playwright, its page, browser context, or request APIs. The reusable HTTP session and Aura material remain in memory and are discarded on close or refresh. The client serializes operations. A recognized expired-session response causes exactly one browser credential remint and one replay of the original direct request; a second expiry raises `SessionExpiredError`.
 

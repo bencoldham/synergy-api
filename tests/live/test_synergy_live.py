@@ -93,10 +93,14 @@ def test_live_sync_reopen_reauthentication_and_secret_hygiene(
     real_fetch = client_module.fetch_usage
     real_wait_for_otp = auth_module.wait_for_otp
 
-    def tracked_mint(value: SynergyCredentials) -> _AuthenticationResult:
+    def tracked_mint(
+        value: SynergyCredentials,
+        *,
+        interactive: bool = False,
+    ) -> _AuthenticationResult:
         nonlocal mint_calls
         mint_calls += 1
-        result = real_mint(value)
+        result = real_mint(value, interactive=interactive)
         observed_secrets.extend((result.sid, result.aura_token, result.aura_context))
         return result
 

@@ -56,21 +56,24 @@ def _discovery_response() -> httpx.Response:
                     "id": "1;a",
                     "state": "SUCCESS",
                     "returnValue": {
-                        "ActiveServices": [
-                            {
-                                "Id": "a00000000000000001",
-                                "value": "a00000000000000001",
-                                "AccountNumber": "0000000001",
-                                "AdditiveField": "ignored",
-                            },
-                            {
-                                "Id": "a00000000000000002",
-                                "value": "a00000000000000002",
-                                "AccountNumber": "0000000002",
-                            },
-                        ],
-                        "InactiveServices": [],
-                        "AdditiveResultField": True,
+                        "returnValue": {
+                            "ActiveServices": [
+                                {
+                                    "Id": "a00000000000000001",
+                                    "value": "a00000000000000001",
+                                    "AccountNumber": "0000000001",
+                                    "AdditiveField": "ignored",
+                                },
+                                {
+                                    "Id": "a00000000000000002",
+                                    "value": "a00000000000000002",
+                                    "AccountNumber": "0000000002",
+                                },
+                            ],
+                            "InactiveServices": [],
+                            "AdditiveResultField": True,
+                        },
+                        "AdditiveWrapperField": "ignored",
                     },
                 }
             ]

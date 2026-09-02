@@ -32,13 +32,22 @@ class SynergyClient:
         "_closed",
         "_credentials",
         "_http_client",
+        "_interactive_auth",
         "_operation_lock",
     )
 
-    def __init__(self, *, credentials: SynergyCredentials) -> None:
+    def __init__(
+        self,
+        *,
+        credentials: SynergyCredentials,
+        interactive_auth: bool = True,
+    ) -> None:
         if not isinstance(credentials, SynergyCredentials):
             raise ConfigurationError("SynergyClient requires SynergyCredentials")
+        if not isinstance(interactive_auth, bool):
+            raise ConfigurationError("interactive_auth must be boolean")
         self._credentials = credentials
+        self._interactive_auth = interactive_auth
         self._operation_lock = RLock()
         self._authentication: _AuthenticationResult | None = None
         self._http_client: httpx.Client | None = None
@@ -69,7 +78,10 @@ class SynergyClient:
             client.close()
 
     def _mint_http_session(self) -> None:
-        authentication = mint_http_credentials(self._credentials)
+        authentication = mint_http_credentials(
+            self._credentials,
+            interactive=self._interactive_auth,
+        )
         client = create_http_client(authentication)
         self._authentication = authentication
         self._http_client = client

@@ -27,6 +27,9 @@ _EXPECTED_SENDER_ADDRESS = "info@synergy.net.au"
 _EXPECTED_SUBJECT = "Your Synergy online one-time passcode"
 _OTP_LINE = re.compile(r"[0-9]{6}\Z")
 _HEADER_QUERY = "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])"
+_UIDVALIDITY_STATUS = re.compile(
+    rb'^(?:"INBOX"|INBOX) \(UIDVALIDITY ([0-9]+)\)$'
+)
 _FULL_MESSAGE_QUERY = "(BODY.PEEK[])"
 
 
@@ -180,8 +183,27 @@ def _uid_call(
     return _require_ok(status, data)
 
 
+def _current_uid_validity(connection: imaplib.IMAP4_SSL) -> int:
+    try:
+        status, data = connection.status(_GMAIL_FOLDER, "(UIDVALIDITY)")
+    except (imaplib.IMAP4.error, OSError, ssl.SSLError):
+        raise _safe_mailbox_error() from None
+    if status != "OK" or not isinstance(data, list) or len(data) != 1:
+        raise _safe_mailbox_error()
+    value = data[0]
+    if not isinstance(value, bytes):
+        raise _safe_mailbox_error()
+    match = _UIDVALIDITY_STATUS.fullmatch(value)
+    if match is None:
+        raise _safe_mailbox_error()
+    parsed = int(match.group(1))
+    if parsed < 1:
+        raise _safe_mailbox_error()
+    return parsed
+
+
 def _search_fresh_uids(mailbox: GmailOtpMailbox) -> list[int]:
-    current_uid_validity = _response_integer(mailbox._connection, "UIDVALIDITY")
+    current_uid_validity = _current_uid_validity(mailbox._connection)
     if current_uid_validity != mailbox.uid_validity:
         raise OtpMailboxError("The Gmail inbox identity changed during OTP retrieval")
 

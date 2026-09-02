@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from enum import Enum, auto
 from urllib.parse import parse_qs, urlsplit
 
@@ -25,6 +28,7 @@ from playwright.sync_api import (
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
+from playwright_stealth import Stealth
 
 from .config import SynergyCredentials
 from .errors import (
@@ -39,8 +43,11 @@ from .otp import gmail_otp_mailbox, wait_for_otp
 _LOGIN_URL = "https://my.synergy.net.au/s/login/"
 _PORTAL_ORIGIN = "https://my.synergy.net.au"
 _AURA_PATH = "/s/sfsites/aura"
+_DASHBOARD_PATH = "/s/service-dashboard"
 _STATE_TIMEOUT_MS = 30_000
 _STATE_POLL_MS = 100
+_LOGIN_RETRY_STABILITY_MS = 2_000
+_INTERACTIVE_STATE_TIMEOUT_MS = 120_000
 _AUTH_MATERIAL_TIMEOUT_MS = 5_000
 _AURA_CONTEXT_KEYS = frozenset(
     {"mode", "fwuid", "app", "loaded", "dn", "globals", "uad"}
@@ -55,10 +62,17 @@ _AUTH_FAILURE_TEXT = re.compile(
     r"(?:invalid|incorrect|locked|unable to log in|check your (?:email|password))",
     re.IGNORECASE,
 )
-_CAPTCHA_TEXT = re.compile(
-    r"(?:captcha|Sorry, Please refresh the page and try again\.)",
+_CAPTCHA_TEXT = re.compile(r"\bcaptcha\b", re.IGNORECASE)
+_RETRYABLE_LOGIN_TEXT = re.compile(
+    r"^Sorry, Please refresh the page and try again\.$",
     re.IGNORECASE,
 )
+_STEALTH = Stealth(
+    chrome_runtime=True,
+    navigator_languages_override=("en-AU", "en"),
+    navigator_platform_override="Linux x86_64",
+)
+_PROFILE_DIR_NAME = "wa-synergy/chrome-profile"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,10 +90,12 @@ class _ObservedAuraCredentials:
     aura_token: str | None = field(default=None, repr=False)
     aura_context: str | None = field(default=None, repr=False)
 
-    def observe(self, request: Request) -> None:
-        """Retain only credentials from a same-origin Aura form request."""
+    def observe(self, request: Request, *, page_url: str) -> None:
+        """Retain credentials only from dashboard-originated Aura form requests."""
 
         try:
+            if urlsplit(page_url).path.rstrip("/") != _DASHBOARD_PATH:
+                return
             parsed_url = urlsplit(request.url)
             if (
                 request.method != "POST"
@@ -103,8 +119,10 @@ class _AuthState(Enum):
     LOGIN = auto()
     AUTHENTICATED = auto()
     OTP = auto()
+    OTP_METHOD = auto()
     REJECTED = auto()
     CAPTCHA = auto()
+    RETRYABLE_LOGIN = auto()
 
 
 def _is_visible(locator: Locator) -> bool:
@@ -121,14 +139,21 @@ def _login_controls(page: Page) -> tuple[Locator, Locator, Locator]:
 
 def _otp_controls(page: Page) -> tuple[Locator, Locator]:
     return (
-        page.get_by_role("textbox", name=_OTP_NAME),
+        page.locator("#otp-field, #otp"),
         page.get_by_role("button", name=_OTP_SUBMIT_NAME),
+    )
+
+
+def _otp_method_controls(page: Page) -> tuple[Locator, Locator]:
+    return (
+        page.get_by_role("button", name="Email", exact=True),
+        page.get_by_role("button", name="SMS", exact=True),
     )
 
 
 def _is_authenticated(page: Page) -> bool:
     path = urlsplit(page.url).path.rstrip("/")
-    if path != "/s/service-dashboard":
+    if path != _DASHBOARD_PATH:
         return False
     return _is_visible(page.get_by_role("button", name=_WELCOME_NAME)) or _is_visible(
         page.get_by_role("button", name="Switch account", exact=True)
@@ -143,20 +168,26 @@ def _detect_state(page: Page, *, include_login: bool) -> _AuthState | None:
     otp_input, otp_submit = _otp_controls(page)
     if _is_visible(otp_input) and _is_visible(otp_submit):
         return _AuthState.OTP
+    email_method, sms_method = _otp_method_controls(page)
+    if _is_visible(email_method) and _is_visible(sms_method):
+        return _AuthState.OTP_METHOD
     if _is_visible(page.get_by_text(_AUTH_FAILURE_TEXT)):
         return _AuthState.REJECTED
+    if _is_visible(page.get_by_text(_RETRYABLE_LOGIN_TEXT)):
+        return _AuthState.RETRYABLE_LOGIN
     if include_login and all(_is_visible(control) for control in _login_controls(page)):
         return _AuthState.LOGIN
     return None
-
 
 def _wait_for_state(
     page: Page,
     allowed: frozenset[_AuthState],
     *,
     include_login: bool = False,
+    timeout_ms: int | None = None,
 ) -> _AuthState:
-    deadline = time.monotonic() + (_STATE_TIMEOUT_MS / 1_000)
+    effective_timeout_ms = _STATE_TIMEOUT_MS if timeout_ms is None else timeout_ms
+    deadline = time.monotonic() + (effective_timeout_ms / 1_000)
     while True:
         state = _detect_state(page, include_login=include_login)
         if state in allowed:
@@ -170,13 +201,135 @@ def _wait_for_state(
         page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
 
 
-def _submit_login(page: Page, credentials: SynergyCredentials) -> None:
+def _wait_for_login_retry_ready(page: Page) -> _AuthState:
+    deadline = time.monotonic() + (_STATE_TIMEOUT_MS / 1_000)
+    login_ready_since: float | None = None
+    terminal_states = frozenset(
+        {
+            _AuthState.AUTHENTICATED,
+            _AuthState.OTP,
+            _AuthState.REJECTED,
+            _AuthState.CAPTCHA,
+        }
+    )
+    while True:
+        state = _detect_state(page, include_login=True)
+        now = time.monotonic()
+        if state in terminal_states:
+            assert state is not None
+            return state
+        if state is _AuthState.LOGIN:
+            if login_ready_since is None:
+                login_ready_since = now
+            if (now - login_ready_since) * 1_000 >= _LOGIN_RETRY_STABILITY_MS:
+                return state
+        else:
+            login_ready_since = None
+        remaining_ms = int((deadline - now) * 1_000)
+        if remaining_ms <= 0:
+            raise AuthenticationContractError(
+                "Synergy login did not become ready for one bounded retry"
+            )
+        page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
+
+
+def _move_pointer(page: Page, control: Locator) -> tuple[float, float]:
+    box = control.bounding_box()
+    if box is None:
+        raise AuthenticationContractError("Synergy login control is not actionable")
+    target_x = box["x"] + box["width"] * (0.35 + secrets.randbelow(31) / 100)
+    target_y = box["y"] + box["height"] * (0.35 + secrets.randbelow(31) / 100)
+    start_x = 20.0 + secrets.randbelow(181)
+    start_y = 20.0 + secrets.randbelow(181)
+    control_x = (start_x + target_x) / 2 + secrets.randbelow(81) - 40
+    control_y = (start_y + target_y) / 2 + secrets.randbelow(81) - 40
+    page.mouse.move(start_x, start_y)
+    steps = 20 + secrets.randbelow(16)
+    for step in range(1, steps + 1):
+        progress = step / steps
+        inverse = 1 - progress
+        x = (
+            inverse * inverse * start_x
+            + 2 * inverse * progress * control_x
+            + progress * progress * target_x
+        )
+        y = (
+            inverse * inverse * start_y
+            + 2 * inverse * progress * control_y
+            + progress * progress * target_y
+        )
+        page.mouse.move(x, y)
+        page.wait_for_timeout(8 + secrets.randbelow(18))
+    return target_x, target_y
+
+
+def _human_click(page: Page, control: Locator) -> None:
+    _move_pointer(page, control)
+    page.wait_for_timeout(80 + secrets.randbelow(181))
+    page.mouse.down()
+    page.wait_for_timeout(70 + secrets.randbelow(131))
+    page.mouse.up()
+
+
+def _human_fill(page: Page, control: Locator, value: str) -> None:
+    _human_click(page, control)
+    control.press("Control+A")
+    control.press("Backspace")
+    control.press_sequentially(value, delay=45 + secrets.randbelow(46))
+    page.wait_for_timeout(100 + secrets.randbelow(301))
+
+
+def _submit_humanized_login(page: Page, credentials: SynergyCredentials) -> None:
+    email, password, submit = _login_controls(page)
+    if not all(_is_visible(control) for control in (email, password, submit)):
+        raise AuthenticationContractError("Synergy login controls changed")
+    _human_fill(page, email, credentials.email)
+    _human_fill(page, password, credentials.password)
+    _human_click(page, submit)
+
+
+def _submit_repeated_login(page: Page, credentials: SynergyCredentials) -> None:
+    email, password, submit = _login_controls(page)
+    if not all(_is_visible(control) for control in (email, password, submit)):
+        raise AuthenticationContractError("Synergy login controls changed")
+    _human_fill(page, email, credentials.email)
+    _human_fill(page, password, credentials.password)
+    _move_pointer(page, submit)
+    for _attempt in range(12):
+        page.mouse.down()
+        page.wait_for_timeout(60 + secrets.randbelow(91))
+        page.mouse.up()
+        page.wait_for_timeout(180 + secrets.randbelow(221))
+        if urlsplit(page.url).path.rstrip("/") != "/s/login":
+            return
+
+
+def _fill_login(page: Page, credentials: SynergyCredentials) -> Locator:
     email, password, submit = _login_controls(page)
     if not all(_is_visible(control) for control in (email, password, submit)):
         raise AuthenticationContractError("Synergy login controls changed")
     email.fill(credentials.email)
     password.fill(credentials.password)
-    submit.click()
+    return submit
+
+
+def _submit_login(
+    page: Page,
+    credentials: SynergyCredentials,
+    *,
+    humanized: bool = False,
+) -> None:
+    if humanized:
+        _submit_humanized_login(page, credentials)
+    else:
+        _fill_login(page, credentials).click()
+
+
+def _submit_otp_method(page: Page) -> None:
+    email_method, sms_method = _otp_method_controls(page)
+    if not (_is_visible(email_method) and _is_visible(sms_method)):
+        raise AuthenticationContractError("Synergy OTP method controls changed")
+    email_method.click()
 
 
 def _submit_otp(page: Page, otp: str) -> None:
@@ -214,13 +367,13 @@ def _wait_for_aura_material(
 ) -> tuple[str, str]:
     deadline = time.monotonic() + (_AUTH_MATERIAL_TIMEOUT_MS / 1_000)
     while True:
+        dom_material = _dom_aura_material(page)
+        if dom_material is not None:
+            return dom_material
         if _valid_aura_material(observed.aura_token, observed.aura_context):
             assert observed.aura_token is not None
             assert observed.aura_context is not None
             return observed.aura_token, observed.aura_context
-        dom_material = _dom_aura_material(page)
-        if dom_material is not None:
-            return dom_material
         remaining_ms = int((deadline - time.monotonic()) * 1_000)
         if remaining_ms <= 0:
             raise AuthenticationContractError(
@@ -253,6 +406,15 @@ def _authentication_result(
         aura_token=token,
         aura_context=aura_context,
     )
+def _browser_profile_path() -> Path:
+    cache_root = os.environ.get("XDG_CACHE_HOME")
+    root = Path(cache_root) if cache_root else Path.home() / ".cache"
+    profile = root / _PROFILE_DIR_NAME
+    profile.mkdir(mode=0o700, parents=True, exist_ok=True)
+    profile.chmod(0o700)
+    return profile
+
+
 
 
 def _close_browser(
@@ -272,17 +434,39 @@ def _close_browser(
 
 
 def _mint_with_playwright(
-    playwright: Playwright, credentials: SynergyCredentials
+    playwright: Playwright,
+    credentials: SynergyCredentials,
+    *,
+    interactive: bool = False,
 ) -> _AuthenticationResult:
     browser: Browser | None = None
     context: BrowserContext | None = None
     page: Page | None = None
     observed = _ObservedAuraCredentials()
     try:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context()
+        if interactive:
+            wayland_display = os.environ.get("WAYLAND_DISPLAY")
+            launch_args = ["--disable-blink-features=AutomationControlled"]
+            if wayland_display:
+                launch_args.append("--ozone-platform=wayland")
+            context = playwright.chromium.launch_persistent_context(
+                str(_browser_profile_path()),
+                channel="chrome",
+                headless=False,
+                args=launch_args,
+                locale="en-AU",
+                timezone_id="Australia/Perth",
+                viewport={"width": 1365, "height": 768},
+            )
+            _STEALTH.apply_stealth_sync(context)
+        else:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context()
         page = context.new_page()
-        page.on("request", lambda request: observed.observe(request))
+        page.on(
+            "request",
+            lambda request: observed.observe(request, page_url=page.url),
+        )
         page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=_STATE_TIMEOUT_MS)
 
         initial_state = _wait_for_state(
@@ -292,6 +476,7 @@ def _mint_with_playwright(
                     _AuthState.LOGIN,
                     _AuthState.AUTHENTICATED,
                     _AuthState.OTP,
+                    _AuthState.OTP_METHOD,
                     _AuthState.CAPTCHA,
                 }
             ),
@@ -299,7 +484,7 @@ def _mint_with_playwright(
         )
         if initial_state is _AuthState.CAPTCHA:
             raise UnsupportedAuthChallenge("Synergy presented an unsupported CAPTCHA")
-        if initial_state is _AuthState.OTP:
+        if initial_state in {_AuthState.OTP, _AuthState.OTP_METHOD}:
             raise AuthenticationContractError(
                 "Synergy requested an OTP before a freshness boundary was captured"
             )
@@ -307,24 +492,62 @@ def _mint_with_playwright(
             return _authentication_result(page, context, observed)
 
         with gmail_otp_mailbox(credentials) as mailbox:
-            _submit_login(page, credentials)
+            _submit_login(page, credentials, humanized=interactive)
+            post_login_states = frozenset(
+                {
+                    _AuthState.AUTHENTICATED,
+                    _AuthState.OTP,
+                    _AuthState.OTP_METHOD,
+                    _AuthState.REJECTED,
+                    _AuthState.CAPTCHA,
+                }
+            )
             post_login_state = _wait_for_state(
                 page,
-                frozenset(
-                    {
-                        _AuthState.AUTHENTICATED,
-                        _AuthState.OTP,
-                        _AuthState.REJECTED,
-                        _AuthState.CAPTCHA,
-                    }
-                ),
+                post_login_states | {_AuthState.RETRYABLE_LOGIN},
             )
+            if post_login_state is _AuthState.RETRYABLE_LOGIN:
+                if interactive:
+                    page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=_STATE_TIMEOUT_MS,
+                    )
+                    retry_state = _wait_for_state(
+                        page,
+                        frozenset({_AuthState.LOGIN, _AuthState.CAPTCHA}),
+                        include_login=True,
+                    )
+                    if retry_state is _AuthState.CAPTCHA:
+                        post_login_state = retry_state
+                    else:
+                        _submit_repeated_login(page, credentials)
+                        post_login_state = _wait_for_state(
+                            page,
+                            post_login_states,
+                        )
+                else:
+                    post_login_state = _wait_for_login_retry_ready(page)
+                    if post_login_state is _AuthState.LOGIN:
+                        _submit_login(page, credentials)
+                        post_login_state = _wait_for_state(page, post_login_states)
             if post_login_state is _AuthState.CAPTCHA:
                 raise UnsupportedAuthChallenge(
                     "Synergy presented an unsupported CAPTCHA"
                 )
             if post_login_state is _AuthState.REJECTED:
                 raise AuthenticationError("Synergy rejected the supplied credentials")
+            if post_login_state is _AuthState.OTP_METHOD:
+                _submit_otp_method(page)
+                post_login_state = _wait_for_state(
+                    page,
+                    frozenset(
+                        {
+                            _AuthState.OTP,
+                            _AuthState.REJECTED,
+                            _AuthState.CAPTCHA,
+                        }
+                    ),
+                )
             if post_login_state is _AuthState.OTP:
                 otp = wait_for_otp(mailbox)
                 _submit_otp(page, otp)
@@ -358,14 +581,24 @@ def _mint_with_playwright(
         _close_browser(page, context, browser)
 
 
-def mint_http_credentials(credentials: SynergyCredentials) -> _AuthenticationResult:
+def mint_http_credentials(
+    credentials: SynergyCredentials,
+    *,
+    interactive: bool = False,
+) -> _AuthenticationResult:
     """Mint direct-HTTP credentials, closing all Playwright state before return."""
 
     if not isinstance(credentials, SynergyCredentials):
         raise AuthenticationError("Synergy authentication requires valid credentials")
+    if not isinstance(interactive, bool):
+        raise AuthenticationError("Synergy interactive authentication must be boolean")
     try:
         with sync_playwright() as playwright:
-            result = _mint_with_playwright(playwright, credentials)
+            result = _mint_with_playwright(
+                playwright,
+                credentials,
+                interactive=interactive,
+            )
         return replace(result, browser_closed=True)
     except (
         AuthenticationError,
