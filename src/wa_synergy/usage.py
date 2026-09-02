@@ -5,13 +5,24 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from typing import NoReturn, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 from zoneinfo import ZoneInfo
 
-from .errors import UsageValidationError
+import httpx
+
+from .errors import (
+    AuthenticationContractError,
+    AuthorizationError,
+    UsageFetchError,
+    UsageValidationError,
+)
 from .models import UsageInterval, UsageQuery
+
+if TYPE_CHECKING:
+    from .auth import _AuthenticationResult
 
 _PERTH = ZoneInfo("Australia/Perth")
 _PROVIDER_UNIT = "KWH"
@@ -20,6 +31,17 @@ _ROW_FIELDS = frozenset({"BillingStatus", "VAL_DAY", "VAL_SOLAR", "VAL_TIME"})
 _DECIMAL_STRING = re.compile(r"[+-]?\d+(?:\.\d{1,3})?\Z")
 _POSSIBLE_CHANNEL = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DEVICE_ID = re.compile(r"[A-Za-z0-9]{18}\Z")
+_PORTAL_ORIGIN = "https://my.synergy.net.au"
+_AURA_PATH = "/s/sfsites/aura"
+_AURA_EXECUTE_QUERY = {"aura.ApexAction.execute": "1"}
+_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded;charset=UTF-8"
+_ACTION_DESCRIPTOR = "aura://ApexActionController/ACTION$execute"
+_USAGE_CONTROLLER = "vlocity_cmt.BusinessProcessDisplayController"
+_USAGE_METHOD = "GenericInvoke2NoCont"
+_INTEGRATION_PROCEDURE_SERVICE = "vlocity_cmt.IntegrationProcedureService"
+_CHART_PROCEDURE = "MyAccount_ChartData"
+_DISCOVERY_CONTROLLER = "CommunityServiceController"
+_DISCOVERY_METHOD = "getLinkedServices"
 
 
 def _reject_json_constant(_value: str) -> NoReturn:
@@ -316,6 +338,264 @@ def normalize_usage_response(
                 row,
                 account_id=account_id,
                 service_point_id=service_point_id,
+                query=query,
+            )
+        )
+    return merge_usage_intervals(intervals)
+
+
+@dataclass(frozen=True, slots=True)
+class _LinkedService:
+    account_id: str
+    service_point_id: str
+
+
+def _require_closed_authentication(authentication: _AuthenticationResult) -> None:
+    if (
+        not getattr(authentication, "browser_closed", False)
+        or not getattr(authentication, "sid", None)
+        or not getattr(authentication, "aura_token", None)
+        or not getattr(authentication, "aura_context", None)
+    ):
+        raise AuthenticationContractError(
+            "Direct HTTP requests require closed-browser authentication material"
+        )
+
+
+def create_http_client(
+    authentication: _AuthenticationResult,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> httpx.Client:
+    """Create a memory-only direct client containing only the captured ``sid`` cookie."""
+
+    _require_closed_authentication(authentication)
+    client = httpx.Client(
+        base_url=_PORTAL_ORIGIN,
+        follow_redirects=False,
+        transport=transport,
+        trust_env=False,
+    )
+    client.headers.clear()
+    client.headers["Content-Type"] = _FORM_CONTENT_TYPE
+    client.cookies.set(
+        "sid",
+        authentication.sid,
+        domain="my.synergy.net.au",
+        path="/",
+    )
+    return client
+
+
+def _apex_action_message(
+    *,
+    controller: str,
+    method: str,
+    parameters: dict[str, object],
+) -> str:
+    action = {
+        "id": "1;a",
+        "descriptor": _ACTION_DESCRIPTOR,
+        "params": {
+            "namespace": "",
+            "classname": controller,
+            "method": method,
+            "params": parameters,
+            "cacheable": False,
+            "isContinuation": False,
+        },
+    }
+    return json.dumps({"actions": [action]}, separators=(",", ":"))
+
+
+def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
+    start = cast(date, query.start).strftime("%Y%m%d")
+    inclusive_end = (cast(date, query.end) - timedelta(days=1)).strftime("%Y%m%d")
+    procedure_input = {
+        "IntervalType": "DAILY",
+        "ChartType": "INTERVAL_DATA",
+        "ServiceId": service_point_id,
+        "StartDate": start,
+        "EndDate": inclusive_end,
+        "PeriodStartDate": start,
+        "PeriodEndDate": inclusive_end,
+        "Device": [],
+    }
+    return _apex_action_message(
+        controller=_USAGE_CONTROLLER,
+        method=_USAGE_METHOD,
+        parameters={
+            "input": json.dumps(procedure_input, separators=(",", ":")),
+            "options": "{}",
+            "sClassName": _INTEGRATION_PROCEDURE_SERVICE,
+            "sMethodName": _CHART_PROCEDURE,
+        },
+    )
+
+
+def _post_aura(
+    client: httpx.Client,
+    authentication: _AuthenticationResult,
+    *,
+    message: str,
+    state: str,
+) -> str:
+    _require_closed_authentication(authentication)
+    try:
+        response = client.post(
+            _AURA_PATH,
+            params=_AURA_EXECUTE_QUERY,
+            data={
+                "message": message,
+                "aura.context": authentication.aura_context,
+                "aura.token": authentication.aura_token,
+            },
+        )
+    except httpx.HTTPError:
+        raise UsageFetchError(f"Synergy {state} request failed") from None
+
+    if response.status_code != 200:
+        raise UsageFetchError(
+            f"Synergy {state} request failed with HTTP {response.status_code}"
+        )
+    content_type = response.headers.get("content-type", "")
+    if content_type.partition(";")[0].strip().lower() != "application/json":
+        raise UsageValidationError(
+            f"Synergy {state} response is not an Aura JSON document"
+        )
+    return response.text
+
+
+def _decode_discovery_response(response_text: str) -> tuple[_LinkedService, ...]:
+    envelope = _object(
+        _loads_decimal(response_text, state="Aura discovery response"),
+        state="Aura discovery response",
+    )
+    actions = envelope.get("actions")
+    if not isinstance(actions, list) or len(actions) != 1:
+        raise UsageValidationError(
+            "Aura discovery response actions must contain one action"
+        )
+    action = _object(actions[0], state="Aura discovery action")
+    if action.get("state") != "SUCCESS":
+        raise UsageValidationError("Aura discovery action state is not successful")
+    result = _required_object(action, "returnValue", state="Aura discovery action")
+    active_services = result.get("ActiveServices")
+    if not isinstance(active_services, list):
+        raise UsageValidationError("Aura discovery ActiveServices must be a list")
+
+    services: dict[str, _LinkedService] = {}
+    for value in active_services:
+        service = _object(value, state="Aura discovery service")
+        service_point_id = _required_string(
+            service,
+            "Id",
+            state="Aura discovery service",
+        )
+        if service.get("value") != service_point_id:
+            raise UsageValidationError("Aura discovery service Id and value must match")
+        linked = _LinkedService(
+            account_id=_required_string(
+                service,
+                "AccountNumber",
+                state="Aura discovery service",
+            ),
+            service_point_id=service_point_id,
+        )
+        existing = services.get(service_point_id)
+        if existing is not None and existing != linked:
+            raise UsageValidationError("Aura discovery contains a conflicting service")
+        services[service_point_id] = linked
+    return tuple(
+        sorted(
+            services.values(),
+            key=lambda service: (service.account_id, service.service_point_id),
+        )
+    )
+
+
+def discover_services(
+    client: httpx.Client,
+    authentication: _AuthenticationResult,
+) -> tuple[_LinkedService, ...]:
+    """Discover every active linked service through the direct Aura endpoint."""
+
+    response_text = _post_aura(
+        client,
+        authentication,
+        message=_apex_action_message(
+            controller=_DISCOVERY_CONTROLLER,
+            method=_DISCOVERY_METHOD,
+            parameters={},
+        ),
+        state="service discovery",
+    )
+    return _decode_discovery_response(response_text)
+
+
+def _services_for_query(
+    client: httpx.Client,
+    authentication: _AuthenticationResult,
+    query: UsageQuery,
+) -> tuple[_LinkedService, ...]:
+    if len(query.account_ids) == 1 and query.service_point_ids:
+        account_id = query.account_ids[0]
+        return tuple(
+            _LinkedService(account_id, service_point_id)
+            for service_point_id in query.service_point_ids
+        )
+
+    discovered = discover_services(client, authentication)
+    selected = tuple(
+        service
+        for service in discovered
+        if (not query.account_ids or service.account_id in query.account_ids)
+        and (
+            not query.service_point_ids
+            or service.service_point_id in query.service_point_ids
+        )
+    )
+    selected_accounts = {service.account_id for service in selected}
+    selected_service_points = {service.service_point_id for service in selected}
+    if (
+        set(query.account_ids) - selected_accounts
+        or set(query.service_point_ids) - selected_service_points
+    ):
+        raise AuthorizationError(
+            "Synergy discovery did not return every requested account and service"
+        )
+    return selected
+
+
+def fetch_usage(
+    client: httpx.Client,
+    authentication: _AuthenticationResult,
+    query: UsageQuery,
+) -> tuple[UsageInterval, ...]:
+    """Fetch and normalize one complete range using direct HTTP only."""
+
+    if not isinstance(client, httpx.Client):
+        raise UsageFetchError("Direct usage retrieval requires an httpx client")
+    if not isinstance(query, UsageQuery):
+        raise UsageValidationError("Direct usage retrieval requires a UsageQuery")
+    _require_closed_authentication(authentication)
+
+    intervals: list[UsageInterval] = []
+    for service in _services_for_query(client, authentication, query):
+        response_text = _post_aura(
+            client,
+            authentication,
+            message=_usage_action_message(
+                service_point_id=service.service_point_id,
+                query=query,
+            ),
+            state="usage",
+        )
+        intervals.extend(
+            normalize_usage_response(
+                response_text,
+                account_id=service.account_id,
+                service_point_id=service.service_point_id,
                 query=query,
             )
         )

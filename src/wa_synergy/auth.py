@@ -6,7 +6,7 @@ import json
 import re
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from urllib.parse import parse_qs, urlsplit
 
@@ -68,6 +68,7 @@ class _AuthenticationResult:
     sid: str = field(repr=False)
     aura_token: str = field(repr=False)
     aura_context: str = field(repr=False)
+    browser_closed: bool = field(default=False, repr=False)
 
 
 @dataclass(slots=True)
@@ -364,7 +365,8 @@ def mint_http_credentials(credentials: SynergyCredentials) -> _AuthenticationRes
         raise AuthenticationError("Synergy authentication requires valid credentials")
     try:
         with sync_playwright() as playwright:
-            return _mint_with_playwright(playwright, credentials)
+            result = _mint_with_playwright(playwright, credentials)
+        return replace(result, browser_closed=True)
     except (
         AuthenticationError,
         AuthenticationContractError,

@@ -356,6 +356,7 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(result.sid, "synthetic-sid")
         self.assertEqual(result.aura_token, "synthetic-aura-token")
         self.assertEqual(result.aura_context, _AURA_CONTEXT)
+        self.assertTrue(result.browser_closed)
         self.assertNotIn("synthetic-sid", repr(result))
         self.assertNotIn("synthetic-aura-token", repr(result))
         self.assertEqual(page.login_submissions, 1)
