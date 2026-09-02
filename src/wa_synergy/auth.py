@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -192,38 +193,6 @@ def _wait_for_state(
         page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
 
 
-def _wait_for_login_retry_ready(page: Page) -> _AuthState:
-    deadline = time.monotonic() + (_STATE_TIMEOUT_MS / 1_000)
-    login_ready_since: float | None = None
-    terminal_states = frozenset(
-        {
-            _AuthState.AUTHENTICATED,
-            _AuthState.OTP,
-            _AuthState.REJECTED,
-            _AuthState.CAPTCHA,
-        }
-    )
-    while True:
-        state = _detect_state(page, include_login=True)
-        now = time.monotonic()
-        if state in terminal_states:
-            assert state is not None
-            return state
-        if state is _AuthState.LOGIN:
-            if login_ready_since is None:
-                login_ready_since = now
-            if (now - login_ready_since) * 1_000 >= _LOGIN_RETRY_STABILITY_MS:
-                return state
-        else:
-            login_ready_since = None
-        remaining_ms = int((deadline - now) * 1_000)
-        if remaining_ms <= 0:
-            raise AuthenticationContractError(
-                f"Synergy login retry never became actionable at {page.url!r}; "
-                f"last detected state: {state.name if state is not None else 'unknown'}"
-            )
-        page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
-
 
 def _move_pointer(page: Page, control: Locator) -> tuple[float, float]:
     box = control.bounding_box()
@@ -309,7 +278,7 @@ def _submit_login(
     page: Page,
     credentials: SynergyCredentials,
     *,
-    humanized: bool = False,
+    humanized: bool = True,
 ) -> None:
     if humanized:
         _submit_humanized_login(page, credentials)
@@ -402,6 +371,21 @@ def _browser_profile_path() -> Path:
     profile.chmod(0o700)
     return profile
 
+def _browser_user_agent(playwright: Playwright) -> str:
+    try:
+        raw = subprocess.check_output(
+            [playwright.chromium.executable_path, "--version"],
+            text=True,
+        )
+        version = raw.strip().split()[-1]
+    except Exception:
+        version = "151.0.0.0"
+    return (
+        f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{version} Safari/537.36"
+    )
+
+
 
 def _close_browser(
     page: Page | None,
@@ -423,31 +407,32 @@ def _mint_with_playwright(
     playwright: Playwright,
     credentials: SynergyCredentials,
     *,
-    interactive: bool = False,
+    headless: bool = True,
 ) -> _AuthenticationResult:
     browser: Browser | None = None
     context: BrowserContext | None = None
     page: Page | None = None
     observed = _ObservedAuraCredentials()
     try:
-        if interactive:
+        user_agent = _browser_user_agent(playwright)
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            f"--user-agent={user_agent}",
+        ]
+        if not headless:
             wayland_display = os.environ.get("WAYLAND_DISPLAY")
-            launch_args = ["--disable-blink-features=AutomationControlled"]
             if wayland_display:
                 launch_args.append("--ozone-platform=wayland")
-            context = playwright.chromium.launch_persistent_context(
-                str(_browser_profile_path()),
-                # channel="chrome", # bluefin patch
-                headless=False,
-                args=launch_args,
-                locale="en-AU",
-                timezone_id="Australia/Perth",
-                viewport={"width": 1365, "height": 768},
-            )
-            _STEALTH.apply_stealth_sync(context)
-        else:
-            browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context()
+        context = playwright.chromium.launch_persistent_context(
+            str(_browser_profile_path()),
+            headless=headless,
+            args=launch_args,
+            user_agent=user_agent,
+            locale="en-AU",
+            timezone_id="Australia/Perth",
+            viewport={"width": 1365, "height": 768},
+        )
+        _STEALTH.apply_stealth_sync(context)
         page = context.new_page()
         page.on(
             "request",
@@ -478,7 +463,7 @@ def _mint_with_playwright(
             return _authentication_result(page, context, observed)
 
         with gmail_otp_mailbox(credentials) as mailbox:
-            _submit_login(page, credentials, humanized=interactive)
+            _submit_login(page, credentials, humanized=True)
             post_login_states = frozenset(
                 {
                     _AuthState.AUTHENTICATED,
@@ -493,29 +478,23 @@ def _mint_with_playwright(
                 post_login_states | {_AuthState.RETRYABLE_LOGIN},
             )
             if post_login_state is _AuthState.RETRYABLE_LOGIN:
-                if interactive:
-                    page.reload(
-                        wait_until="domcontentloaded",
-                        timeout=_STATE_TIMEOUT_MS,
-                    )
-                    retry_state = _wait_for_state(
-                        page,
-                        frozenset({_AuthState.LOGIN, _AuthState.CAPTCHA}),
-                        include_login=True,
-                    )
-                    if retry_state is _AuthState.CAPTCHA:
-                        post_login_state = retry_state
-                    else:
-                        _submit_repeated_login(page, credentials)
-                        post_login_state = _wait_for_state(
-                            page,
-                            post_login_states,
-                        )
+                page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=_STATE_TIMEOUT_MS,
+                )
+                retry_state = _wait_for_state(
+                    page,
+                    frozenset({_AuthState.LOGIN, _AuthState.CAPTCHA}),
+                    include_login=True,
+                )
+                if retry_state is _AuthState.CAPTCHA:
+                    post_login_state = retry_state
                 else:
-                    post_login_state = _wait_for_login_retry_ready(page)
-                    if post_login_state is _AuthState.LOGIN:
-                        _submit_login(page, credentials)
-                        post_login_state = _wait_for_state(page, post_login_states)
+                    _submit_repeated_login(page, credentials)
+                    post_login_state = _wait_for_state(
+                        page,
+                        post_login_states,
+                    )
             if post_login_state is _AuthState.CAPTCHA:
                 raise UnsupportedAuthChallenge(
                     "Synergy presented an unsupported CAPTCHA"
@@ -584,18 +563,23 @@ def _mint_with_playwright(
 def mint_http_credentials(
     credentials: SynergyCredentials,
     *,
-    interactive: bool = False,
+    headless: bool = True,
+    interactive: bool | None = None,
 ) -> _AuthenticationResult:
     """Mint direct-HTTP credentials, closing all Playwright state before return."""
 
     if not isinstance(credentials, SynergyCredentials):
         raise AuthenticationError("Synergy authentication requires valid credentials")
-    if not isinstance(interactive, bool):
-        raise AuthenticationError("Synergy interactive authentication must be boolean")
+    if not isinstance(headless, bool):
+        raise AuthenticationError("Synergy headless parameter must be boolean")
+    if interactive is not None:
+        if not isinstance(interactive, bool):
+            raise AuthenticationError("Synergy interactive authentication must be boolean")
+        headless = not interactive
     with sync_playwright() as playwright:
         result = _mint_with_playwright(
             playwright,
             credentials,
-            interactive=interactive,
+            headless=headless,
         )
     return replace(result, browser_closed=True)

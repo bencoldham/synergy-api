@@ -21,8 +21,8 @@ class SynergyClient:
         "_authentication",
         "_closed",
         "_credentials",
+        "_headless",
         "_http_client",
-        "_interactive_auth",
         "_operation_lock",
     )
 
@@ -30,14 +30,19 @@ class SynergyClient:
         self,
         *,
         credentials: SynergyCredentials,
-        interactive_auth: bool = True,
+        headless: bool = True,
+        interactive_auth: bool | None = None,
     ) -> None:
         if not isinstance(credentials, SynergyCredentials):
             raise ConfigurationError("SynergyClient requires SynergyCredentials")
-        if not isinstance(interactive_auth, bool):
-            raise ConfigurationError("interactive_auth must be boolean")
+        if not isinstance(headless, bool):
+            raise ConfigurationError("headless must be boolean")
+        if interactive_auth is not None:
+            if not isinstance(interactive_auth, bool):
+                raise ConfigurationError("interactive_auth must be boolean")
+            headless = not interactive_auth
         self._credentials = credentials
-        self._interactive_auth = interactive_auth
+        self._headless = headless
         self._operation_lock = RLock()
         self._authentication: _AuthenticationResult | None = None
         self._http_client: httpx.Client | None = None
@@ -56,6 +61,14 @@ class SynergyClient:
     ) -> None:
         self.close()
 
+    @property
+    def headless(self) -> bool:
+        return self._headless
+
+    @property
+    def interactive_auth(self) -> bool:
+        return not self._headless
+
     def _require_open(self) -> None:
         if self._closed:
             raise UsageFetchError("SynergyClient is closed")
@@ -70,7 +83,7 @@ class SynergyClient:
     def _mint_http_session(self) -> None:
         authentication = mint_http_credentials(
             self._credentials,
-            interactive=self._interactive_auth,
+            headless=self._headless,
         )
         client = create_http_client(authentication)
         self._authentication = authentication
