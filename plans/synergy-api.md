@@ -32,15 +32,41 @@ Provider references:
 - [Zoho free-plan IMAP limitation](https://www.zoho.com/mail/help/imap-access.html)
 - [Proton Mail Bridge requirement](https://proton.me/support/imap-smtp-and-pop3-setup)
 
-Required Gmail setup:
+### User Gmail and Synergy setup
 
-1. Create a personal `@gmail.com` account used only for Synergy. Do not use a managed Google Workspace account.
-2. Change the Synergy account’s login/notification email to that Gmail address and confirm Synergy OTP mail arrives in `INBOX`.
-3. Enable Google 2-Step Verification using a configuration that permits app passwords. Accounts using security-key-only 2-Step Verification or Advanced Protection do not expose app passwords and are unsupported.
-4. Generate a distinct Google app password named `wa-synergy`. Supply that value to the client; never supply or store the normal Google Account password.
-5. If Synergy mail is classified as spam during contract capture, add a Gmail filter for the captured exact sender with “Never send it to Spam.” The implementation reads only `INBOX`; it does not enumerate Gmail labels or Spam.
+Complete these steps manually before running a live test:
 
-This intentionally accepts one operational constraint: changing the Google Account password revokes the app password, so the operator must generate a replacement. It is preferable to implementing and persisting an OAuth refresh-token lifecycle for one dedicated mailbox.
+1. **Create a dedicated personal Gmail account.**
+   - Use a new `@gmail.com` address only for Synergy.
+   - Do not use Google Workspace, Advanced Protection, or a mailbox containing unrelated email.
+2. **Enable Google 2-Step Verification.**
+   - Open [Google Account Security](https://myaccount.google.com/security) and enable **2-Step Verification**.
+   - Do not configure it exclusively with security keys; that prevents app-password use.
+3. **Create a Gmail app password.**
+   - Open [Google App Passwords](https://myaccount.google.com/apppasswords).
+   - Create an app password named `wa-synergy`, copy the generated 16-character value, and store it securely; Google displays it only once.
+   - Use this app password with the client. Never provide the normal Google Account password.
+4. **Change the Synergy email address.**
+   - Sign in to [Synergy My Account](https://my.synergy.net.au/).
+   - Change the login and notification email to the dedicated Gmail address, then complete any verification requested by Synergy.
+5. **Verify OTP delivery.**
+   - Sign out of Synergy and sign in again to trigger an OTP.
+   - Confirm the message arrives in Gmail `INBOX`.
+   - If it lands in Spam, create a Gmail filter for the exact Synergy sender and select **Never send it to Spam**. The client reads only `INBOX`.
+6. **Provide the live-test secrets as environment variables.**
+
+   ```text
+   WA_SYNERGY_EMAIL=<dedicated Gmail address>
+   WA_SYNERGY_PASSWORD=<Synergy password>
+   WA_SYNERGY_GMAIL_APP_PASSWORD=<Google app password>
+   ```
+
+   Keep these values environment-only or in a secret manager. Never commit them to the repository.
+7. **Maintain the credentials.**
+   - Gmail IMAP is already enabled; there is no IMAP setting to change.
+   - Changing the Google Account password revokes the app password. Generate a replacement and update `WA_SYNERGY_GMAIL_APP_PASSWORD`.
+
+This intentionally accepts app-password rotation in place of implementing and persisting an OAuth refresh-token lifecycle for one dedicated mailbox.
 
 ## Recommended architecture
 
@@ -136,7 +162,7 @@ from wa_synergy import (
 
 credentials = SynergyCredentials(
     email="dedicated-synergy-account@gmail.com",
-    password="...",            # Synergy password
+    password="...",  # Synergy password
     gmail_app_password="...",  # Google app password; never the Google password
 )
 
