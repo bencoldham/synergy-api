@@ -108,7 +108,7 @@ class _AuthState(Enum):
 
 
 def _is_visible(locator: Locator) -> bool:
-    return locator.count() > 0 and locator.first.is_visible()
+    return any(locator.nth(index).is_visible() for index in range(locator.count()))
 
 
 def _login_controls(page: Page) -> tuple[Locator, Locator, Locator]:

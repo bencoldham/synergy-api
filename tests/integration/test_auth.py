@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 from playwright.sync_api import Error as PlaywrightError
 
-from wa_synergy.auth import mint_http_credentials
+from wa_synergy.auth import _is_visible, mint_http_credentials
 from wa_synergy.config import SynergyCredentials
 from wa_synergy.errors import (
     AuthenticationContractError,
@@ -64,6 +64,9 @@ class FakeLocator:
 
     @property
     def first(self) -> FakeLocator:
+        return self
+
+    def nth(self, _index: int) -> FakeLocator:
         return self
 
     def count(self) -> int:
@@ -347,6 +350,25 @@ class AuthenticationTests(unittest.TestCase):
         ):
             result = mint_http_credentials(self.credentials)
         return result, otp_wait
+
+    def test_visibility_uses_any_matching_element_not_only_the_first(self) -> None:
+        class VisibilityLocator:
+            def __init__(self, visibility: tuple[bool, ...], index: int = 0) -> None:
+                self.visibility = visibility
+                self.index = index
+
+            def count(self) -> int:
+                return len(self.visibility)
+
+            def nth(self, index: int) -> VisibilityLocator:
+                return VisibilityLocator(self.visibility, index)
+
+            def is_visible(self) -> bool:
+                return self.visibility[self.index]
+
+        self.assertTrue(_is_visible(VisibilityLocator((False, True))))  # type: ignore[arg-type]
+        self.assertFalse(_is_visible(VisibilityLocator((False, False))))  # type: ignore[arg-type]
+        self.assertFalse(_is_visible(VisibilityLocator(())))  # type: ignore[arg-type]
 
     def test_primary_login_without_otp_mints_only_direct_http_material(self) -> None:
         page, context, browser, chromium, manager, mailbox = self.harness()
