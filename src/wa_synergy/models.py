@@ -108,7 +108,7 @@ class UsageQuery:
 
 @dataclass(frozen=True, slots=True)
 class UsageInterval:
-    """One normalized half-hour channel quantity.
+    """One normalized channel quantity over a discrete interval.
 
     Rows have canonical kWh units and UTC boundaries. ``meter_id`` remains optional
     because the observed provider response aggregates rows across its device list and
@@ -142,9 +142,9 @@ class UsageInterval:
 
         interval_start = _utc_datetime(self.interval_start, field="interval_start")
         interval_end = _utc_datetime(self.interval_end, field="interval_end")
-        if interval_end - interval_start != self.DURATION:
+        if interval_end <= interval_start:
             raise UsageValidationError(
-                "UsageInterval boundaries must define one 30-minute interval"
+                "UsageInterval interval_end must be after interval_start"
             )
         object.__setattr__(self, "interval_start", interval_start)
         object.__setattr__(self, "interval_end", interval_end)

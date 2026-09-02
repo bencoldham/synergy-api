@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 _PERTH = ZoneInfo("Australia/Perth")
 _PROVIDER_UNIT = "KWH"
 _IMPORT_CHANNELS = frozenset({"OFF_PEAK", "PEAK", "SUPER_OFFPEAK"})
-_ROW_FIELDS = frozenset({"BillingStatus", "VAL_DAY", "VAL_SOLAR", "VAL_TIME"})
+_ROW_FIELDS = frozenset({"BillingStatus", "VAL_DAY"})
 _DECIMAL_STRING = re.compile(r"[+-]?\d+(?:\.\d{1,3})?\Z")
 _POSSIBLE_CHANNEL = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DEVICE_ID = re.compile(r"[A-Za-z0-9]{18}\Z")
@@ -154,19 +154,29 @@ def _parse_day(value: object) -> date:
 
 def _parse_time(value: object) -> time:
     if not isinstance(value, str) or len(value) != 4 or not value.isascii():
-        raise UsageValidationError("Usage row VAL_TIME must use HHMM format")
+        raise UsageValidationError(f"Usage row VAL_TIME must use HHMM format, got {value!r}")
     if not value.isdigit():
-        raise UsageValidationError("Usage row VAL_TIME must use HHMM format")
+        raise UsageValidationError(f"Usage row VAL_TIME must use HHMM format, got {value!r}")
     hour = int(value[:2])
     minute = int(value[2:])
     if hour > 23 or minute not in (0, 30):
         raise UsageValidationError(
-            "Usage row VAL_TIME must identify a 30-minute boundary"
+            f"Usage row VAL_TIME must identify a 30-minute boundary, got {value!r}"
         )
     return time(hour=hour, minute=minute)
 
-
 def _parse_quantity(value: object, *, field: str) -> Decimal:
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise UsageValidationError(f"Usage row {field} must be finite")
+        exp = value.as_tuple().exponent
+        if not isinstance(exp, int) or exp < -3:
+            raise UsageValidationError(
+                f"Usage row {field} must be a decimal with at most three places"
+            )
+        return value
+    if isinstance(value, (int, float)):
+        value = str(value)
     if not isinstance(value, str) or _DECIMAL_STRING.fullmatch(value) is None:
         raise UsageValidationError(
             f"Usage row {field} must be a decimal string with at most three places"
@@ -206,10 +216,10 @@ def _validate_chart(ip_result: dict[str, object]) -> dict[str, object]:
             f"IPResult ChartType is {ip_result.get('ChartType')!r}; "
             f"expected 'INTERVAL_DATA'"
         )
-    if ip_result.get("IntervalType") != "WEEK":
+    if ip_result.get("IntervalType") != "MONTH":
         raise UsageValidationError(
             f"IPResult IntervalType is {ip_result.get('IntervalType')!r}; "
-            f"expected 'WEEK'"
+            f"expected 'MONTH'"
         )
     chart_data = _required_object(ip_result, "ChartData", state="IPResult")
     if chart_data.get("errorCode") != "INVOKE-200" or chart_data.get("error") != "OK":
@@ -227,19 +237,10 @@ def _normalize_row(
     account_id: str,
     service_point_id: str,
     query: UsageQuery,
-) -> tuple[UsageInterval, UsageInterval]:
+) -> tuple[UsageInterval, ...]:
     missing = _ROW_FIELDS - row.keys()
     if missing:
         raise UsageValidationError("Usage row is missing a required field")
-
-    import_channels = _IMPORT_CHANNELS & row.keys()
-    if len(import_channels) != 1:
-        raise UsageValidationError(
-            "Usage row must contain exactly one captured import channel"
-        )
-    for field in row.keys() - _ROW_FIELDS - _IMPORT_CHANNELS:
-        if _looks_like_unknown_channel(field, row[field]):
-            raise UsageValidationError("Usage row contains an unknown quantity channel")
 
     billing_status = _required_string(row, "BillingStatus", state="Usage row")
     day = _parse_day(row["VAL_DAY"])
@@ -247,36 +248,44 @@ def _normalize_row(
     end_date = cast(date, query.end)
     if not start_date <= day < end_date:
         raise UsageValidationError("Usage row is outside the requested date range")
-    row_time = _parse_time(row["VAL_TIME"])
-    local_start = datetime.combine(day, row_time, tzinfo=_PERTH)
-    interval_start = local_start.astimezone(UTC)
-    interval_end = (local_start + timedelta(minutes=30)).astimezone(UTC)
 
-    import_channel = next(iter(import_channels))
-    return (
-        UsageInterval(
-            account_id=account_id,
-            service_point_id=service_point_id,
-            meter_id=None,
-            channel=import_channel,
-            interval_start=interval_start,
-            interval_end=interval_end,
-            consumption_kwh=_parse_quantity(row[import_channel], field=import_channel),
-            quality=billing_status,
-            source_updated_at=None,
-        ),
-        UsageInterval(
-            account_id=account_id,
-            service_point_id=service_point_id,
-            meter_id=None,
-            channel="VAL_SOLAR",
-            interval_start=interval_start,
-            interval_end=interval_end,
-            consumption_kwh=_parse_quantity(row["VAL_SOLAR"], field="VAL_SOLAR"),
-            quality=billing_status,
-            source_updated_at=None,
-        ),
-    )
+    val_time = row.get("VAL_TIME")
+    if val_time is not None:
+        row_time = _parse_time(val_time)
+        local_start = datetime.combine(day, row_time, tzinfo=_PERTH)
+        interval_start = local_start.astimezone(UTC)
+        interval_end = (local_start + timedelta(minutes=30)).astimezone(UTC)
+    else:
+        local_start = datetime.combine(day, time.min, tzinfo=_PERTH)
+        interval_start = local_start.astimezone(UTC)
+        interval_end = (local_start + timedelta(days=1)).astimezone(UTC)
+
+    channels = row.keys() - {"BillingStatus", "VAL_DAY", "VAL_TIME"}
+    intervals: list[UsageInterval] = []
+    for channel in sorted(channels):
+        val = row[channel]
+        if (
+            _looks_like_unknown_channel(channel, val)
+            or channel in _IMPORT_CHANNELS
+            or channel == "VAL_SOLAR"
+        ):
+            qty = _parse_quantity(val, field=channel)
+            intervals.append(
+                UsageInterval(
+                    account_id=account_id,
+                    service_point_id=service_point_id,
+                    meter_id=None,
+                    channel=channel,
+                    interval_start=interval_start,
+                    interval_end=interval_end,
+                    consumption_kwh=qty,
+                    quality=billing_status,
+                    source_updated_at=None,
+                )
+            )
+    if not intervals:
+        raise UsageValidationError("Usage row contains no quantity channels")
+    return tuple(intervals)
 
 
 def _interval_sort_key(
@@ -334,12 +343,13 @@ def normalize_usage_response(
     if not isinstance(response, list):
         raise UsageValidationError("ChartData Response must be a list")
 
-    seen_rows: dict[tuple[date, time], dict[str, object]] = {}
+    seen_rows: dict[tuple[date, time | None], dict[str, object]] = {}
     intervals: list[UsageInterval] = []
     for value in response:
         row = _object(value, state="Usage row")
         day = _parse_day(row.get("VAL_DAY"))
-        row_time = _parse_time(row.get("VAL_TIME"))
+        val_time = row.get("VAL_TIME")
+        row_time = _parse_time(val_time) if val_time is not None else None
         row_identity = (day, row_time)
         existing = seen_rows.get(row_identity)
         if existing is not None:
@@ -428,25 +438,29 @@ def _apex_action_message(
 def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
     start_date = cast(date, query.start)
     inclusive_end_date = cast(date, query.end) - timedelta(days=1)
+    start_ymd = start_date.strftime("%Y%m%d")
+    end_ymd = inclusive_end_date.strftime("%Y%m%d")
+    start_iso = start_date.isoformat()
+    end_iso = inclusive_end_date.isoformat()
     procedure_input = {
-        "StartDate": start_date.strftime("%Y%m%d"),
-        "EndDate": inclusive_end_date.strftime("%Y%m%d"),
+        "StartDate": start_ymd,
+        "EndDate": end_ymd,
         "ServiceId": service_point_id,
-        "IntervalType": "WEEK",
+        "IntervalType": "MONTH",
         "ChartType": "INTERVAL_DATA",
         "Interval": "",
         "Daily": "X",
         "Monthly": "",
-        "DisplayOptionValue": "Weekly",
+        "DisplayOptionValue": "Other",
         "Device": [],
-        "PeriodStartDate": start_date.isoformat(),
-        "PeriodEndDate": inclusive_end_date.isoformat(),
+        "PeriodStartDate": start_iso,
+        "PeriodEndDate": end_iso,
         "PreviousMeters": [],
-        "UnbilledStartDate": start_date.isoformat(),
-        "UnbilledEndDate": inclusive_end_date.isoformat(),
+        "UnbilledStartDate": start_iso,
+        "UnbilledEndDate": end_iso,
         "AmiMeterCount": 1,
-        "OtherStartDate": None,
-        "OtherEndDate": None,
+        "OtherStartDate": start_iso,
+        "OtherEndDate": end_iso,
     }
     return _apex_action_message(
         controller=_USAGE_CONTROLLER,
