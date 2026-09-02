@@ -8,16 +8,50 @@
 
 No implementation was performed.
 
+## Email provider decision
+
+Use one **dedicated, free personal Gmail account** as both the Synergy login address and the OTP mailbox. Gmail is the sole supported mailbox provider for this implementation.
+
+Selection:
+
+| Provider | Free-plan automation path | Decision |
+|---|---|---|
+| Gmail | Personal Gmail has IMAP permanently enabled; a 16-character app password can authenticate a non-Google IMAP client after 2-Step Verification is enabled. | **Selected.** Fixed server settings plus an app password keep the runtime on Python’s standard library and avoid OAuth client registration, consent, refresh tokens, and token persistence. |
+| Outlook.com | Free IMAP exists, but it must be enabled and Microsoft specifies OAuth2/Modern Auth. | Rejected because OAuth adds application registration and token lifecycle state. |
+| Yahoo Mail | Free IMAP and app passwords are available. | Viable, but it offers no implementation advantage over Gmail and does not make 2-Step Verification an explicit prerequisite for app-password use. |
+| Zoho Mail | Newly registered free-plan users do not receive IMAP access, and the free plan is region-dependent. | Rejected because free IMAP cannot be relied upon. |
+| Proton Mail | IMAP requires Proton Mail Bridge, which is limited to paid plans. | Rejected because it violates the free-provider requirement and adds a local daemon. |
+
+Provider references:
+
+- [Create a free personal Gmail account](https://support.google.com/mail/answer/56256)
+- [Gmail IMAP is always enabled for personal accounts](https://support.google.com/mail/answer/7126229)
+- [Google app-password requirements and revocation behavior](https://support.google.com/accounts/answer/185833)
+- [Outlook.com IMAP requires OAuth2/Modern Auth](https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com)
+- [Yahoo Mail app-password access](https://help.yahoo.com/kb/account/access-yahoo-mail-third-party-apps-sln15241.html)
+- [Zoho free-plan IMAP limitation](https://www.zoho.com/mail/help/imap-access.html)
+- [Proton Mail Bridge requirement](https://proton.me/support/imap-smtp-and-pop3-setup)
+
+Required Gmail setup:
+
+1. Create a personal `@gmail.com` account used only for Synergy. Do not use a managed Google Workspace account.
+2. Change the Synergy account’s login/notification email to that Gmail address and confirm Synergy OTP mail arrives in `INBOX`.
+3. Enable Google 2-Step Verification using a configuration that permits app passwords. Accounts using security-key-only 2-Step Verification or Advanced Protection do not expose app passwords and are unsupported.
+4. Generate a distinct Google app password named `wa-synergy`. Supply that value to the client; never supply or store the normal Google Account password.
+5. If Synergy mail is classified as spam during contract capture, add a Gmail filter for the captured exact sender with “Never send it to Spam.” The implementation reads only `INBOX`; it does not enumerate Gmail labels or Spam.
+
+This intentionally accepts one operational constraint: changing the Google Account password revokes the app password, so the operator must generate a replacement. It is preferable to implementing and persisting an OAuth refresh-token lifecycle for one dedicated mailbox.
+
 ## Recommended architecture
 
 Use a synchronous Python client built around one long-lived, in-memory Playwright browser context:
 
 - Playwright handles the Salesforce login and OTP challenge without reproducing private Aura internals.
 - The same authenticated context calls the usage endpoint, preserving cookies and any page-bound session state.
-- `imaplib`, `email`, and `sqlite3` cover OTP retrieval and persistence without additional abstractions.
+- `imaplib`, `email`, and `sqlite3` cover Gmail OTP retrieval and persistence without non-stdlib email or OAuth dependencies.
 - The browser context is retained until `SynergyClient.close()`. Cookies/tokens are not serialized to disk.
 - Other modules remain functions and immutable data classes. No Home Assistant imports.
-- Do not introduce interchangeable transport, repository, or authentication-provider interfaces.
+- Do not introduce interchangeable transport, repository, mailbox-provider, or authentication-provider interfaces.
 - If authenticated capture later proves the JSON endpoint only needs transferable cookies, replacing Playwright requests with `httpx.Client` can be a clean internal optimization—not an abstraction added up front.
 
 ## Proposed file structure
@@ -70,21 +104,21 @@ Use a synchronous Python client built around one long-lived, in-memory Playwrigh
 | File | Responsibility |
 |---|---|
 | `pyproject.toml` | Package metadata, supported Python version, Playwright dependency, and test/lint/type-check configuration. |
-| `README.md` | Installation, Chromium setup, public API examples, configuration, SQLite schema, security constraints, and live-test instructions. |
+| `README.md` | Installation, Chromium and dedicated Gmail setup, app-password rotation, public API examples, SQLite schema, security constraints, and live-test instructions. |
 | `src/wa_synergy/__init__.py` | Small public surface: `SynergyClient`, configuration types, usage models, exceptions, and `sync_usage_to_db`. |
-| `config.py` | Immutable `SynergyCredentials` and `ImapSettings`. Password fields excluded from `repr`; no environment-variable loading inside the library. |
+| `config.py` | Immutable `SynergyCredentials` containing the dedicated Gmail address, Synergy password, and Gmail app password. Both password fields are excluded from `repr`; no environment-variable loading inside the library. |
 | `models.py` | Immutable, slotted `UsageQuery`, `UsageInterval`, and `SyncResult` data classes. Defines canonical units and timestamp semantics. |
 | `errors.py` | Safe exception hierarchy. Messages must not include response bodies, credentials, OTPs, cookies, tokens, or mailbox contents. |
-| `otp.py` | TLS IMAP connection, new-message detection, sender/subject filtering, MIME parsing, OTP extraction, and bounded polling. No Synergy HTTP logic. |
+| `otp.py` | Gmail-only TLS IMAP access to fixed `imap.gmail.com:993`/`INBOX`, UID freshness tracking, sender/subject filtering, MIME parsing, OTP extraction, and bounded polling. No Synergy HTTP logic or generic provider abstraction. |
 | `auth.py` | Initial portal navigation, primary credential submission, optional OTP challenge handling, authenticated-state detection, and known authentication-loss detection. |
 | `usage.py` | Account/service-point resolution, construction of the captured authenticated request, pagination/date chunking if required, JSON decoding, validation, and normalization. |
 | `client.py` | Owns Playwright lifecycle and authenticated browser context. Exposes `get_usage()`, serializes browser access, retains the session, and performs one reauthentication/replay. |
 | `storage.py` | SQLite schema creation/versioning and transactional, idempotent upserts of normalized records. Contains no network logic. |
 | `sync.py` | Thin orchestration function: call the client, then write the complete normalized result to SQLite. Database writes are not a hidden side effect of `get_usage()`. |
-| `tests/conftest.py` | Local fake portal, fake endpoint responses, fake IMAP client, and common sanitized fixtures. |
+| `tests/conftest.py` | Local fake portal, scripted fake Gmail IMAP connection, fake endpoint responses, and common sanitized fixtures. |
 | `tests/unit/*` | Pure parsing, normalization, model, and SQLite behavior. No external network. |
 | `tests/integration/*` | Browser login, session retention, reauthentication, endpoint fetch, and on-disk sync against a local synthetic portal. |
-| `tests/live/test_synergy_live.py` | Explicitly opted-in smoke test using dedicated credentials and mailbox. Never part of the default suite or CI. |
+| `tests/live/test_synergy_live.py` | Explicitly opted-in smoke test using a dedicated Synergy/personal Gmail account. Never part of the default suite or CI. |
 | `AGENTS.md` | Repository-wide implementation, architecture, security, and verification rules. |
 | `tests/AGENTS.md` | Stricter fixture sanitization, offline-test, and live-test rules. |
 
@@ -94,7 +128,6 @@ Use a synchronous Python client built around one long-lived, in-memory Playwrigh
 from pathlib import Path
 
 from wa_synergy import (
-    ImapSettings,
     SynergyClient,
     SynergyCredentials,
     UsageQuery,
@@ -102,24 +135,18 @@ from wa_synergy import (
 )
 
 credentials = SynergyCredentials(
-    email="account@example.com",
-    password="...",
+    email="dedicated-synergy-account@gmail.com",
+    password="...",            # Synergy password
+    gmail_app_password="...",  # Google app password; never the Google password
 )
 
-imap = ImapSettings(
-    host="imap.example.com",
-    port=993,
-    username="otp-mailbox@example.com",
-    password="...",
-    folder="INBOX",
-)
 
 query = UsageQuery(
     start="2026-07-01",
     end="2026-08-01",  # Exclusive
 )
 
-with SynergyClient(credentials=credentials, imap=imap) as client:
+with SynergyClient(credentials=credentials) as client:
     intervals = client.get_usage(query)
 
     result = sync_usage_to_db(
@@ -172,7 +199,7 @@ flowchart LR
     C --> D{Authenticated?}
     D -- No --> E[Portal login]
     E --> F{OTP requested?}
-    F -- Yes --> G[Poll dedicated IMAP mailbox]
+    F -- Yes --> G[Poll dedicated Gmail INBOX over TLS IMAP]
     G --> H[Submit new OTP]
     F -- No --> I[Authenticated browser context]
     H --> I
@@ -206,31 +233,33 @@ Detailed sequence:
 
 ### Initial authentication
 
-1. Validate required Synergy and IMAP settings before launching the browser.
-2. Navigate to the canonical login URL and wait for the login form or an authenticated page marker.
-3. Record an OTP freshness boundary before submitting credentials:
-   - Prefer the mailbox’s `UIDNEXT`.
-   - Also record the authentication start time in UTC.
-4. Fill email and password using accessible labels/roles, not generated CSS class names.
-5. Submit once and wait for one of these explicit states:
+1. Validate local configuration before network access:
+   - The Synergy email is the dedicated personal `@gmail.com` address.
+   - The Synergy password and Gmail app password are present and excluded from representations and errors.
+   - There are no caller-controlled IMAP host, port, folder, TLS, or authentication-method settings.
+2. Before submitting Synergy credentials, open `imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=ssl.create_default_context())`.
+3. Authenticate to Gmail with the full Synergy email address and the Google app password, never the Google Account password.
+4. Select `INBOX` read-only and record its `UIDVALIDITY`, `UIDNEXT`, and the authentication start time in UTC. Keep this connection for the bounded authentication attempt.
+5. Navigate to the canonical Synergy login URL and wait for the login form or an authenticated page marker.
+6. Fill email and Synergy password using accessible labels/roles, not generated CSS class names.
+7. Submit once and wait for one of these explicit states:
    - Authenticated landing page.
    - OTP challenge.
    - Invalid credentials/account lock.
    - Unsupported challenge such as CAPTCHA.
    - Unknown portal state or timeout.
-6. If no OTP challenge appears, finish authentication without opening or polling message bodies.
-7. If OTP is requested:
-   - Connect using IMAP over TLS with certificate verification.
-   - Select the configured dedicated folder.
-   - Search by UID for messages at or above the captured boundary.
-   - Filter by the exact captured Synergy sender and subject pattern.
-   - Use `BODY.PEEK[]` so unrelated messages are not marked read.
+8. If no OTP challenge appears, close the Gmail connection without fetching any messages.
+9. If OTP is requested:
+   - Poll the same read-only `INBOX` connection with UID search, considering only UIDs at or above the captured `UIDNEXT`.
+   - Fetch only `From`, `Subject`, `Date`, and `Message-ID` headers with `BODY.PEEK` while selecting candidates.
+   - Parse and compare the normalized sender and subject against the exact patterns established by the authorized Synergy capture; Gmail search results alone are not an allowlist.
+   - Fetch the full MIME message with `BODY.PEEK[]` only for matching candidates, so messages are not marked read.
    - Parse both `text/plain` and `text/html` MIME parts.
    - Extract only the captured OTP format—not an unrestricted “any digits” expression.
    - Select the newest unambiguous candidate.
-   - Submit the OTP once.
-8. Confirm authenticated state using a stable page or endpoint signal, not cookie presence alone.
-9. Retain the browser context and its cookie jar in memory until the client closes.
+   - Submit the OTP once and close the Gmail connection in a `finally` path.
+10. Confirm authenticated state using a stable page or endpoint signal, not cookie presence alone.
+11. Retain the browser context and its cookie jar in memory until the client closes.
 
 ### Session reauthentication
 
@@ -282,12 +311,12 @@ No default hidden path under the user’s home directory. The caller must supply
 
 | Area | Failure | Required handling |
 |---|---|---|
-| Configuration | Missing credentials, invalid date range, TLS disabled, non-disk DB path | Fail before network access with a safe configuration error. |
+| Configuration | Missing credentials, non-`@gmail.com` Synergy email, invalid date range, non-disk DB path | Fail before network access with a safe configuration error. |
 | Portal availability | DNS, TLS, navigation timeout, maintenance page | Raise a transport/authentication error without response bodies or secrets. |
 | Primary auth | Invalid email/password, locked account | Raise `AuthenticationError`; do not retry or request repeated OTPs. |
 | Bot protection | CAPTCHA or unfamiliar challenge | Raise `UnsupportedAuthChallenge`; never attempt bypass. |
 | Portal drift | Login controls or authenticated marker changed | Raise a typed portal-contract error with only the failed state name. |
-| IMAP | TLS failure, invalid mailbox credentials, missing folder | Raise `OtpMailboxError`; do not expose server transcript. |
+| Gmail IMAP | DNS/TLS failure, rejected or revoked app password, app passwords unavailable by account policy, `INBOX` selection failure | Raise `OtpMailboxError`; do not expose the server transcript or credential. |
 | OTP delivery | Message delayed beyond timeout | Raise `OtpTimeoutError` after bounded monotonic polling. |
 | OTP selection | Only stale messages, multiple ambiguous messages, sender mismatch | Reject rather than guess. |
 | OTP parsing | Multipart/HTML encoding change or unexpected OTP format | Raise `OtpParseError`; do not log message content. |
@@ -303,15 +332,16 @@ No default hidden path under the user’s home directory. The caller must supply
 | Database | Permission denied, locked, full disk, corruption | Roll back and raise `StorageError`; normalized records remain available only to the caller that fetched them. |
 | Process interruption | Browser or process dies during sync | SQLite transaction rolls back; next run can safely upsert again. |
 | Concurrency | Two calls use the same Playwright context | Serialize public client operations with one lock. |
-| Secret leakage | Exception, logging, tracing, fixtures | Never include credentials, OTPs, cookies, tokens, mailbox bodies, raw responses, or Playwright recordings. |
+| Secret leakage | Exception, logging, tracing, fixtures | Never include Synergy credentials, Gmail app passwords, OTPs, cookies, tokens, mailbox bodies, raw responses, or Playwright recordings. |
 
 ## Implementation steps in order
 
 1. **Capture the provider contract**
-   - Use an authorized test account and dedicated OTP mailbox.
-   - Capture successful login with and without OTP, account discovery, usage request, session-expiry response, pagination, and date limits.
+   - Use an authorized Synergy test account whose login address is a dedicated free personal Gmail account configured as specified above.
+   - Capture successful login with and without OTP, the exact OTP sender/subject/body pattern, account discovery, usage request, session-expiry response, pagination, and date limits.
+   - Confirm the OTP reaches Gmail `INBOX`; create the exact-sender “Never send it to Spam” filter only if capture shows it is needed.
    - Extract only selectors, state signals, request shapes, and sanitized response schemas.
-   - Do not commit HAR files, storage state, headers, cookies, tokens, real emails, account IDs, or OTP messages.
+   - Do not commit HAR files, storage state, headers, cookies, tokens, real emails, account IDs, app passwords, or OTP messages.
 
 2. **Freeze the public normalized contract**
    - Define `[start, end)` query semantics.
@@ -320,7 +350,7 @@ No default hidden path under the user’s home directory. The caller must supply
 
 3. **Create package configuration**
    - Add `pyproject.toml`, package exports, Playwright dependency, and offline test configuration.
-   - Add safe credential/IMAP configuration data classes with secret-free `repr`.
+   - Add one safe `SynergyCredentials` data class with `email`, `password`, and `gmail_app_password`; exclude both secrets from `repr`.
 
 4. **Implement response validation and normalization first**
    - Build against sanitized real response fixtures.
@@ -333,9 +363,10 @@ No default hidden path under the user’s home directory. The caller must supply
    - Implement secure file creation, transactional batch upserts, and deterministic conflict handling.
    - Prove persistence using a real temporary file reopened by a second connection.
 
-6. **Implement IMAP OTP retrieval**
-   - Add TLS connection, UID freshness boundary, sender/subject filtering, MIME parsing, polling timeout, and precise OTP extraction.
-   - Verify plain text, HTML, stale, ambiguous, malformed, and timeout cases.
+6. **Implement Gmail OTP retrieval**
+   - Hard-code `imap.gmail.com`, port `993`, certificate-verified TLS, and read-only `INBOX`; do not expose generic IMAP or OAuth configuration.
+   - Log in with the Synergy Gmail address plus its Google app password, capture `UIDVALIDITY`/`UIDNEXT`, filter exact captured headers, parse MIME, and poll with a monotonic deadline.
+   - Verify plain text, HTML, stale, ambiguous, malformed, rejected/revoked app-password, and timeout cases.
 
 7. **Implement browser authentication**
    - Add label/role-based login interaction and explicit state detection.
@@ -362,14 +393,14 @@ No default hidden path under the user’s home directory. The caller must supply
     - Verify session reuse, exactly one reauthentication, replay, normalized return values, and on-disk database rows.
 
 12. **Run an opt-in live smoke test**
-    - Dedicated Synergy account and dedicated mailbox only.
+    - Dedicated Synergy account using the dedicated free personal Gmail address and a separately generated Google app password only.
     - Fetch a small date range into a temporary SQLite file.
     - Confirm the database reopens and contains the expected normalized interval count.
     - Clear/expire the test session and confirm one automatic reauthentication.
     - Inspect captured logs to confirm sentinel secrets never appear.
 
 13. **Finish documentation and security review**
-    - Document installation, browser dependency, mailbox isolation, API usage, database schema, error behavior, and unsupported CAPTCHA.
+    - Document installation, browser dependency, personal Gmail/2-Step Verification/app-password setup and rotation, mailbox isolation, API usage, database schema, error behavior, and unsupported CAPTCHA.
     - Verify no recordings, real provider payloads, credentials, or session files are present.
 
 ## Tests to add
@@ -391,19 +422,22 @@ No default hidden path under the user’s home directory. The caller must supply
 - Stable deterministic ordering.
 - Pagination/chunk merge with no gaps or duplicates.
 
-### OTP/IMAP
+### OTP/Gmail IMAP
 
+- Fixed `imap.gmail.com:993` endpoint, certificate-verified TLS, and read-only `INBOX`.
 - Plain-text OTP.
 - HTML-only OTP.
 - Multipart and quoted-printable/base64 email.
-- UID boundary excludes stale OTPs.
-- Sender and subject allowlists.
+- Captured `UIDVALIDITY`/`UIDNEXT` boundary excludes stale OTPs.
+- Exact captured sender and subject patterns.
+- Header-only candidate filtering precedes full `BODY.PEEK[]`.
 - Newest matching message selected.
 - Ambiguous candidates rejected.
 - Malformed OTP rejected.
 - Poll timeout uses monotonic time.
-- `BODY.PEEK[]` does not mark messages read.
-- IMAP TLS/auth/folder errors map to safe exceptions.
+- Gmail messages remain unread.
+- Rejected/revoked app passwords and TLS/select errors map to safe `OtpMailboxError` values.
+- Synergy and Gmail app-password sentinels never appear in logs, exceptions, or generated files.
 
 ### Authentication
 
@@ -447,12 +481,12 @@ No default hidden path under the user’s home directory. The caller must supply
 - Forced session expiry → reauthentication → successful database upsert.
 - Malformed second page writes no partial data.
 - Multi-account sync includes every account.
-- Log and exception capture contains none of the supplied password, OTP, cookie, token, mailbox content, or raw response sentinels.
+- Log and exception capture contains none of the supplied Synergy-password, Gmail-app-password, OTP, cookie, token, mailbox-content, or raw-response sentinels.
 
 ### Live
 
 - Mark with `@pytest.mark.live`.
-- Require an explicit opt-in flag plus environment-supplied secrets.
+- Require an explicit opt-in flag plus `WA_SYNERGY_EMAIL`, `WA_SYNERGY_PASSWORD`, and `WA_SYNERGY_GMAIL_APP_PASSWORD`; keep all three environment-only.
 - Skip by default and in normal CI.
 - Use a short date range and temporary database.
 - Never emit a trace, screenshot, HAR, storage state, response body, or fixture.
@@ -466,28 +500,28 @@ Include:
 - Supported setup, test, lint, type-check, and Playwright installation commands.
 - Core package must never import Home Assistant.
 - `SynergyClient` is the only session-owning class; prefer functions elsewhere.
-- Authentication logic stays in `auth.py`, IMAP in `otp.py`, endpoint/normalization in `usage.py`, and SQL in `storage.py`.
-- No transport/repository/provider interfaces without an existing second implementation.
+- Authentication logic stays in `auth.py`, Gmail-only IMAP logic stays in `otp.py`, endpoint/normalization stays in `usage.py`, and SQL stays in `storage.py`.
+- No transport, repository, or mailbox-provider interfaces without an existing second implementation; Gmail host, port, and `INBOX` are fixed internal constants.
 - Session expiration permits exactly one reauthentication and replay.
 - Normalized invariants: UTC-aware timestamps, `Decimal` kWh, stable identifiers, deterministic ordering.
 - `get_usage()` has no database side effects.
-- Never log or commit credentials, OTPs, cookies, tokens, mailbox bodies, raw provider responses, HARs, traces, screenshots, or Playwright storage state.
+- Never log or commit Synergy credentials, Gmail app passwords, OTPs, cookies, tokens, mailbox bodies, raw provider responses, HARs, traces, screenshots, or Playwright storage state.
 - Provider fixtures must be manually sanitized and reviewed.
 - Default tests must be offline.
-- Live tests require explicit opt-in and dedicated accounts.
+- Live tests require explicit opt-in and the dedicated Synergy/personal Gmail account.
 - Provider protocol changes require refreshing sanitized fixtures and affected contract tests.
 
 ### `tests/AGENTS.md`
 
 Include:
 
-- Real Synergy and mailbox access is forbidden outside `tests/live`.
-- Test fixtures may contain only invented emails, IDs, OTPs, cookies, tokens, and usage values.
+- Real Synergy and Gmail access is forbidden outside `tests/live`.
+- Test fixtures may contain only invented Gmail addresses, IDs, app passwords, OTPs, cookies, tokens, and usage values.
 - Never commit raw captures; hand-author a minimal fixture from a sanitized schema.
 - Use temporary on-disk SQLite databases for persistence tests, not only `:memory:`.
 - Auth tests must assert attempt counts to catch repeated login/OTP loops.
-- Every secret-related test supplies unique sentinels and asserts they are absent from logs, exceptions, and generated files.
+- Every secret-related test supplies unique Synergy-password and Gmail-app-password sentinels and asserts they are absent from logs, exceptions, and generated files.
 - Default test execution must succeed without network access or secrets.
-- Live tests must clean up browser contexts and temporary databases even after failure.
+- Live tests must log out of Gmail IMAP, close browser contexts, and remove temporary databases even after failure.
 
 A source-local `src/wa_synergy/AGENTS.md` is not warranted initially; it would duplicate the root rules.
