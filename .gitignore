@@ -52,3 +52,20 @@ site/
 # IDE files
 # .idea/
 # .vscode/
+
+# Sensitive runtime data and browser recordings
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+*.har
+*.har.zip
+*.webm
+trace.zip
+playwright-report/
+blob-report/
+test-results/
+playwright/.auth/
+.auth/
+storage-state*.json
+storage_state*.json
