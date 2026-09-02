@@ -1,7 +1,7 @@
-from dataclasses import FrozenInstanceError
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
 import unittest
+from dataclasses import FrozenInstanceError
+from datetime import UTC, date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from wa_synergy.errors import (
     AuthenticationContractError,
@@ -36,25 +36,31 @@ class UsageQueryTests(unittest.TestCase):
             ("2026-07-01", "2026-07-01"),
             ("2026-07-02", "2026-07-01"),
         ):
-            with self.subTest(start=start, end=end):
-                with self.assertRaises(ConfigurationError):
-                    UsageQuery(start=start, end=end)
+            with (
+                self.subTest(start=start, end=end),
+                self.assertRaises(ConfigurationError),
+            ):
+                UsageQuery(start=start, end=end)
 
     def test_only_exact_iso_calendar_dates_are_accepted(self) -> None:
         for value in ("20260701", "2026-7-1", datetime(2026, 7, 1)):
-            with self.subTest(value=value):
-                with self.assertRaises(ConfigurationError):
-                    UsageQuery(start=value, end="2026-08-01")  # type: ignore[arg-type]
+            with (
+                self.subTest(value=value),
+                self.assertRaises(ConfigurationError),
+            ):
+                UsageQuery(start=value, end="2026-08-01")  # type: ignore[arg-type]
 
     def test_filters_reject_ambiguous_or_duplicate_identifiers(self) -> None:
         for account_ids in ("123", ("123", "123"), (" 123",), ("",)):
-            with self.subTest(account_ids=account_ids):
-                with self.assertRaises(ConfigurationError):
-                    UsageQuery(
-                        start="2026-07-01",
-                        end="2026-08-01",
-                        account_ids=account_ids,  # type: ignore[arg-type]
-                    )
+            with (
+                self.subTest(account_ids=account_ids),
+                self.assertRaises(ConfigurationError),
+            ):
+                UsageQuery(
+                    start="2026-07-01",
+                    end="2026-08-01",
+                    account_ids=account_ids,  # type: ignore[arg-type]
+                )
 
     def test_query_is_immutable_and_slotted(self) -> None:
         query = UsageQuery(start="2026-07-01", end="2026-08-01")
@@ -89,11 +95,11 @@ class UsageIntervalTests(unittest.TestCase):
 
         self.assertEqual(
             interval.interval_start,
-            datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
         )
         self.assertEqual(
             interval.interval_end,
-            datetime(2026, 7, 1, 0, 30, tzinfo=timezone.utc),
+            datetime(2026, 7, 1, 0, 30, tzinfo=UTC),
         )
         self.assertEqual(interval.consumption_kwh.as_tuple().exponent, -3)
         self.assertEqual(interval.UNIT, "kWh")
@@ -122,15 +128,19 @@ class UsageIntervalTests(unittest.TestCase):
             datetime(2026, 7, 1, 9, 0, tzinfo=timezone(timedelta(hours=8))),
             datetime(2026, 7, 1, 8, 30),
         ):
-            with self.subTest(end=end):
-                with self.assertRaises(UsageValidationError):
-                    self.make_interval(interval_end=end)
+            with (
+                self.subTest(end=end),
+                self.assertRaises(UsageValidationError),
+            ):
+                self.make_interval(interval_end=end)
 
     def test_quantity_requires_a_finite_decimal(self) -> None:
         for quantity in (1.23, Decimal("NaN"), Decimal("Infinity")):
-            with self.subTest(quantity=quantity):
-                with self.assertRaises(UsageValidationError):
-                    self.make_interval(consumption_kwh=quantity)
+            with (
+                self.subTest(quantity=quantity),
+                self.assertRaises(UsageValidationError),
+            ):
+                self.make_interval(consumption_kwh=quantity)
 
     def test_interval_is_immutable_and_slotted(self) -> None:
         interval = self.make_interval()
@@ -149,9 +159,8 @@ class SyncResultTests(unittest.TestCase):
 
     def test_counts_are_non_negative_integers(self) -> None:
         for value in (-1, 1.5, True):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    SyncResult(inserted=value, updated=0, unchanged=0)  # type: ignore[arg-type]
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                SyncResult(inserted=value, updated=0, unchanged=0)  # type: ignore[arg-type]
 
 
 class ExceptionHierarchyTests(unittest.TestCase):

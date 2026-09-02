@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import ClassVar
 
@@ -30,9 +31,11 @@ def _query_date(value: date | str, *, field: str) -> date:
     return parsed
 
 
-def _identifier_filter(value: tuple[str, ...], *, field: str) -> tuple[str, ...]:
+def _identifier_filter(value: Iterable[str], *, field: str) -> tuple[str, ...]:
     if isinstance(value, str):
-        raise ConfigurationError(f"UsageQuery {field} must be a collection of identifiers")
+        raise ConfigurationError(
+            f"UsageQuery {field} must be a collection of identifiers"
+        )
     try:
         identifiers = tuple(value)
     except TypeError as exc:
@@ -40,7 +43,11 @@ def _identifier_filter(value: tuple[str, ...], *, field: str) -> tuple[str, ...]
             f"UsageQuery {field} must be a collection of identifiers"
         ) from exc
     for identifier in identifiers:
-        if not isinstance(identifier, str) or not identifier or identifier != identifier.strip():
+        if (
+            not isinstance(identifier, str)
+            or not identifier
+            or identifier != identifier.strip()
+        ):
             raise ConfigurationError(
                 f"UsageQuery {field} must contain non-empty string identifiers"
             )
@@ -55,9 +62,13 @@ def _required_identifier(value: str, *, field: str) -> None:
 
 
 def _utc_datetime(value: datetime, *, field: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise UsageValidationError(f"UsageInterval {field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +147,10 @@ class UsageInterval:
         object.__setattr__(self, "interval_start", interval_start)
         object.__setattr__(self, "interval_end", interval_end)
 
-        if not isinstance(self.consumption_kwh, Decimal) or not self.consumption_kwh.is_finite():
+        if (
+            not isinstance(self.consumption_kwh, Decimal)
+            or not self.consumption_kwh.is_finite()
+        ):
             raise UsageValidationError(
                 "UsageInterval consumption_kwh must be a finite Decimal"
             )
