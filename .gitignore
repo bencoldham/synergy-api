@@ -25,6 +25,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
+
 # Environments
 .env
 .envrc
@@ -72,3 +73,4 @@ storage_state*.json
 
 # Custom
 foo.py
+node_modules/

@@ -451,7 +451,7 @@ def _mint_with_playwright(
                 launch_args.append("--ozone-platform=wayland")
             context = playwright.chromium.launch_persistent_context(
                 str(_browser_profile_path()),
-                channel="chrome",
+                #channel="chrome", # bluefin patch
                 headless=False,
                 args=launch_args,
                 locale="en-AU",
@@ -592,6 +592,13 @@ def mint_http_credentials(
         raise AuthenticationError("Synergy authentication requires valid credentials")
     if not isinstance(interactive, bool):
         raise AuthenticationError("Synergy interactive authentication must be boolean")
+    with sync_playwright() as playwright:
+        result = _mint_with_playwright(
+            playwright,
+            credentials,
+            interactive=interactive,
+        )
+    return replace(result, browser_closed=True)
     try:
         with sync_playwright() as playwright:
             result = _mint_with_playwright(
