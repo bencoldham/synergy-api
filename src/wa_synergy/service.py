@@ -124,7 +124,7 @@ class SynergyService:
         except SynergyError as exc:
             with self._state_lock:
                 self._last_error = type(exc).__name__
-            _LOGGER.exception("WA Synergy synchronization failed")
+            _LOGGER.exception("Synchronization failed: %s", exc)
             raise
         finally:
             with self._state_lock:
@@ -183,8 +183,17 @@ class _Server(ThreadingHTTPServer):
 class _RequestHandler(BaseHTTPRequestHandler):
     server: _Server
 
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        _LOGGER.info(
+            "%s %s -> %s (%s)",
+            self.command,
+            self.path,
+            code,
+            self.address_string(),
+        )
+
     def log_message(self, format: str, *args: object) -> None:
-        _LOGGER.info("HTTP %s - %s", self.address_string(), format % args)
+        _LOGGER.warning("%s (%s)", format % args, self.address_string())
 
     def _send(self, status: HTTPStatus, value: object) -> None:
         payload = json.dumps(value, separators=(",", ":")).encode()
@@ -326,7 +335,11 @@ def main() -> None:
     parser.add_argument("--options", type=Path)
     arguments = parser.parse_args()
     settings = _load_settings(arguments.options)
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     service = SynergyService(settings)
     server = _Server((settings.host, settings.port), _RequestHandler)
