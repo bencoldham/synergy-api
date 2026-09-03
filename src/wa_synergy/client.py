@@ -9,7 +9,7 @@ import httpx
 
 from .auth import _AuthenticationResult, mint_http_credentials
 from .config import SynergyCredentials
-from .errors import ConfigurationError, UsageFetchError
+from .errors import ConfigurationError, SessionExpiredError, UsageFetchError
 from .models import UsageInterval, UsageQuery
 from .usage import create_http_client, fetch_usage
 
@@ -84,14 +84,21 @@ class SynergyClient:
         return self._http_client, self._authentication
 
     def get_usage(self, query: UsageQuery) -> tuple[UsageInterval, ...]:
-        """Fetch usage with the token captured during login."""
+        """Fetch usage, reminting credentials once after confirmed session loss."""
 
         if not isinstance(query, UsageQuery):
             raise ConfigurationError("get_usage requires a UsageQuery")
         with self._operation_lock:
             self._require_open()
-            client, authentication = self._current_http_session()
-            return fetch_usage(client, authentication, query)
+            for attempt in range(2):
+                client, authentication = self._current_http_session()
+                try:
+                    return fetch_usage(client, authentication, query)
+                except SessionExpiredError:
+                    self._discard_http_session()
+                    if attempt == 1:
+                        raise
+            raise AssertionError("unreachable")
 
     def close(self) -> None:
         """Close and discard all direct-HTTP state; repeated calls are harmless."""

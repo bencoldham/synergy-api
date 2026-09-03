@@ -20,6 +20,9 @@ class AuthenticationContractError(AuthenticationError):
 class UnsupportedAuthChallenge(AuthenticationError):
     """Authentication requires an unsupported challenge, such as CAPTCHA."""
 
+class SessionExpiredError(AuthenticationError):
+    """A direct session remained expired after one credential remint."""
+
 
 class OtpError(AuthenticationError):
     """Base class for one-time-passcode failures."""

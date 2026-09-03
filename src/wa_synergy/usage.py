@@ -8,11 +8,12 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, NoReturn, cast
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from .errors import UsageFetchError, UsageValidationError
+from .errors import SessionExpiredError, UsageFetchError, UsageValidationError
 from .models import UsageInterval, UsageQuery
 
 if TYPE_CHECKING:
@@ -477,6 +478,44 @@ def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
     )
 
 
+def _contains_invalid_session_error(value: object) -> bool:
+    if isinstance(value, str):
+        return "access to the apex class named" in value.casefold()
+    if isinstance(value, dict):
+        return any(_contains_invalid_session_error(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_invalid_session_error(item) for item in value)
+    return False
+
+
+def _is_invalid_session_payload(response_text: str) -> bool:
+    try:
+        ip_result = _decode_usage_response(response_text)
+    except UsageValidationError:
+        return False
+    return (
+        "ChartData" not in ip_result
+        and set(ip_result) <= {"success", "error"}
+        and _contains_invalid_session_error(ip_result)
+    )
+
+
+def _is_login_redirect(response: httpx.Response) -> bool:
+    location = response.headers.get("location")
+    if not response.is_redirect or not isinstance(location, str):
+        return False
+    return urlsplit(location).path.rstrip("/") == "/s/login"
+
+
+def _looks_like_login_html(response_text: str) -> bool:
+    folded = response_text.casefold()
+    return (
+        "<html" in folded
+        and 'type="password"' in folded
+        and ("log in" in folded or "login" in folded)
+    )
+
+
 def _post_aura(
     client: httpx.Client,
     authentication: _AuthenticationResult,
@@ -486,34 +525,50 @@ def _post_aura(
     controller: str,
     method: str,
 ) -> str:
-    response = client.post(
-        _AURA_PATH,
-        params=_AURA_EXECUTE_QUERY,
-        headers={
-            "X-SFDC-LDS-Endpoints": (
-                f"ApexActionController.execute:{controller}.{method}"
-            )
-        },
-        data={
-            "message": message,
-            "aura.context": authentication.aura_context,
-            "aura.token": authentication.aura_token,
-        },
-    )
+    try:
+        response = client.post(
+            _AURA_PATH,
+            params=_AURA_EXECUTE_QUERY,
+            headers={
+                "X-SFDC-LDS-Endpoints": (
+                    f"ApexActionController.execute:{controller}.{method}"
+                )
+            },
+            data={
+                "message": message,
+                "aura.context": authentication.aura_context,
+                "aura.token": authentication.aura_token,
+            },
+        )
+    except httpx.HTTPError as exc:
+        raise UsageFetchError(f"Synergy {state} request failed: {exc}") from exc
 
-    response.raise_for_status()
+    if response.status_code == 401 or _is_login_redirect(response):
+        raise SessionExpiredError("Synergy direct session expired")
+    if _is_invalid_session_payload(response.text):
+        raise SessionExpiredError("Synergy direct session was rejected")
+
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise UsageFetchError(
+            f"Synergy {state} request failed with HTTP {response.status_code}"
+        ) from exc
+
     content_type = response.headers.get("content-type", "")
-    if content_type.partition(";")[0].strip().lower() != "application/json":
+    media_type = content_type.partition(";")[0].strip().lower()
+    if media_type != "application/json":
+        if media_type == "text/html" and _looks_like_login_html(response.text):
+            raise SessionExpiredError("Synergy direct session returned the login page")
         raise UsageValidationError(
             f"Synergy {state} response has content type {content_type!r}, "
-            f"expected application/json; body: {response.text!r}"
+            "expected application/json"
         )
     try:
         json.loads(response.text)
     except json.JSONDecodeError as exc:
-        raise UsageFetchError(
-            f"Synergy {state} response was not valid JSON: {exc}; "
-            f"body: {response.text!r}"
+        raise SessionExpiredError(
+            "Synergy direct session returned an invalid Aura response"
         ) from exc
     return response.text
 

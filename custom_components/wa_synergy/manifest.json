@@ -1,0 +1,13 @@
+{
+  "domain": "wa_synergy",
+  "name": "WA Synergy",
+  "codeowners": ["@bencoldham"],
+  "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/bencoldham/synergy-api",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/bencoldham/synergy-api/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

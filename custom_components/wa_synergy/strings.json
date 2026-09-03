@@ -1,0 +1,42 @@
+{
+  "title": "WA Synergy",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to WA Synergy",
+        "description": "Enter the URL and API token configured in the WA Synergy companion app.",
+        "data": {
+          "url": "Service URL",
+          "api_token": "API token"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect to WA Synergy",
+        "description": "Update the companion service connection details.",
+        "data": {
+          "url": "Service URL",
+          "api_token": "API token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to a valid WA Synergy service",
+      "invalid_auth": "The API token was rejected"
+    },
+    "abort": {
+      "already_configured": "This WA Synergy account is already configured",
+      "reauth_successful": "Authentication was updated",
+      "unique_id_mismatch": "The service belongs to a different WA Synergy account"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "data_through": {
+        "name": "Data available through"
+      },
+      "last_success": {
+        "name": "Last successful sync"
+      }
+    }
+  }
+}

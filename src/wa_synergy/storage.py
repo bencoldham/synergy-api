@@ -363,3 +363,88 @@ def get_stored_days(
         raise StorageError(
             f"Failed to query stored usage days from {path}: {exc}"
         ) from exc
+
+
+def get_usage_intervals(
+    db_path: Path,
+    *,
+    table_name: str = "daily_usage_intervals",
+    start: datetime | None = None,
+    end: datetime | None = None,
+    service_point_ids: tuple[str, ...] = (),
+) -> tuple[UsageInterval, ...]:
+    """Read normalized intervals from SQLite in stable identity order."""
+
+    path = _validated_path(db_path)
+    if not path.exists():
+        return ()
+    _validate_table_name(table_name)
+
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if start is not None:
+        clauses.append("interval_start_utc >= ?")
+        parameters.append(_canonical_datetime(start, field="start"))
+    if end is not None:
+        clauses.append("interval_start_utc < ?")
+        parameters.append(_canonical_datetime(end, field="end"))
+    if service_point_ids:
+        placeholders = ",".join("?" for _ in service_point_ids)
+        clauses.append(f"service_point_id IN ({placeholders})")
+        parameters.extend(service_point_ids)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    try:
+        with sqlite3.connect(path) as connection:
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            if not table_exists:
+                return ()
+            rows = connection.execute(
+                f"""
+                SELECT account_id,
+                       service_point_id,
+                       meter_id,
+                       channel,
+                       interval_start_utc,
+                       interval_end_utc,
+                       consumption_kwh,
+                       quality,
+                       source_updated_at_utc
+                FROM {table_name}
+                {where_clause}
+                ORDER BY account_id,
+                         service_point_id,
+                         COALESCE(meter_id, ''),
+                         interval_start_utc,
+                         channel,
+                         interval_end_utc
+                """,
+                parameters,
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise StorageError(
+            f"Failed to read stored usage intervals from {path}: {exc}"
+        ) from exc
+
+    def parsed_datetime(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    return tuple(
+        UsageInterval(
+            account_id=row[0],
+            service_point_id=row[1],
+            meter_id=row[2],
+            channel=row[3],
+            interval_start=parsed_datetime(row[4]),
+            interval_end=parsed_datetime(row[5]),
+            consumption_kwh=Decimal(row[6]),
+            quality=row[7],
+            source_updated_at=(
+                parsed_datetime(row[8]) if row[8] is not None else None
+            ),
+        )
+        for row in rows
+    )

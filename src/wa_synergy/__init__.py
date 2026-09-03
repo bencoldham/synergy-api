@@ -11,7 +11,7 @@ from .errors import (
     OtpParseError,
     OtpRejectedError,
     OtpTimeoutError,
-    StorageError,
+    SessionExpiredError,
     SynergyError,
     UnsupportedAuthChallenge,
     UsageError,
@@ -19,17 +19,21 @@ from .errors import (
     UsageValidationError,
 )
 from .models import SyncResult, UsageInterval, UsageQuery
+from .statistics import HourlyStatistic, build_hourly_import_statistics
+from .storage import get_usage_intervals
 from .sync import sync_usage_to_db
 
 __all__ = (
     "AuthenticationContractError",
     "AuthenticationError",
     "ConfigurationError",
+    "HourlyStatistic",
     "OtpError",
     "OtpMailboxError",
     "OtpParseError",
     "OtpRejectedError",
     "OtpTimeoutError",
+    "SessionExpiredError",
     "StorageError",
     "SyncResult",
     "SynergyClient",
@@ -41,5 +45,7 @@ __all__ = (
     "UsageInterval",
     "UsageQuery",
     "UsageValidationError",
+    "build_hourly_import_statistics",
+    "get_usage_intervals",
     "sync_usage_to_db",
 )

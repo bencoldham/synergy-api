@@ -1,0 +1,7 @@
+{
+  "name": "WA Synergy",
+  "content_in_root": false,
+  "country": ["AU"],
+  "homeassistant": "2026.9.0",
+  "render_readme": true
+}
