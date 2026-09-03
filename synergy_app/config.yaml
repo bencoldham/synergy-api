@@ -1,5 +1,5 @@
 name: WA Synergy
-version: "0.1.1"
+version: "0.1.2"
 slug: wa_synergy
 description: Fetch delayed WA Synergy usage for Home Assistant
 url: https://github.com/bencoldham/synergy-api

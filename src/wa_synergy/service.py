@@ -29,6 +29,7 @@ from .sync import sync_usage_to_db
 
 _LOGGER = logging.getLogger(__name__)
 _PERTH = ZoneInfo("Australia/Perth")
+_REQUEST_DAYS = 31
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,20 +91,33 @@ class SynergyService:
             existing = get_usage_intervals(self.settings.db_path)
             days = self.settings.refresh_days if existing else self.settings.backfill_days
             end = datetime.now(_PERTH).date()
-            start = end - timedelta(days=days)
-            result = sync_usage_to_db(
-                client=self._client,
-                query=UsageQuery(start=start, end=end, interval_type="DAILY"),
-                db_path=self.settings.db_path,
-                force=True,
-            )
+            current = end - timedelta(days=days)
+            inserted = 0
+            updated = 0
+            unchanged = 0
+            while current < end:
+                chunk_end = min(current + timedelta(days=_REQUEST_DAYS), end)
+                result = sync_usage_to_db(
+                    client=self._client,
+                    query=UsageQuery(
+                        start=current,
+                        end=chunk_end,
+                        interval_type="DAILY",
+                    ),
+                    db_path=self.settings.db_path,
+                    force=True,
+                )
+                inserted += result.inserted
+                updated += result.updated
+                unchanged += result.unchanged
+                current = chunk_end
             with self._state_lock:
                 self._last_success = datetime.now(UTC)
                 self._last_error = None
             return {
-                "inserted": result.inserted,
-                "updated": result.updated,
-                "unchanged": result.unchanged,
+                "inserted": inserted,
+                "updated": updated,
+                "unchanged": unchanged,
             }
         except SynergyError as exc:
             with self._state_lock:

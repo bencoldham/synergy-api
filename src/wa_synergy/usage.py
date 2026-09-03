@@ -34,6 +34,7 @@ _USAGE_NAMESPACE = "vlocity_cmt"
 _USAGE_CONTROLLER = "BusinessProcessDisplayController"
 _USAGE_METHOD = "GenericInvoke2NoCont"
 _INTEGRATION_PROCEDURE_SERVICE = "vlocity_cmt.IntegrationProcedureService"
+_HTTP_TIMEOUT = httpx.Timeout(60.0, connect=15.0)
 _CHART_PROCEDURE = "MyAccount_ChartData"
 
 
@@ -386,6 +387,7 @@ def create_http_client(
 
     client = httpx.Client(
         base_url=_PORTAL_ORIGIN,
+        timeout=_HTTP_TIMEOUT,
         follow_redirects=False,
         transport=transport,
         trust_env=False,
