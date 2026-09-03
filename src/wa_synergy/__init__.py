@@ -19,7 +19,7 @@ from .errors import (
     UsageValidationError,
 )
 from .models import SyncResult, UsageInterval, UsageQuery
-from .sync import find_missing_date_ranges, sync_daily_usage_to_db, sync_usage_to_db
+from .sync import sync_usage_to_db
 
 __all__ = (
     "AuthenticationContractError",
@@ -41,7 +41,5 @@ __all__ = (
     "UsageInterval",
     "UsageQuery",
     "UsageValidationError",
-    "find_missing_date_ranges",
-    "sync_daily_usage_to_db",
     "sync_usage_to_db",
 )

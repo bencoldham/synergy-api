@@ -430,18 +430,13 @@ dependencies = [
     { name = "httpx" },
     { name = "playwright" },
     { name = "playwright-stealth" },
-    { name = "python-dotenv" },
 ]
 
 [package.optional-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "python-dotenv" },
     { name = "ruff" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "wa-synergy" },
 ]
 
 [package.metadata]
@@ -450,10 +445,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
     { name = "playwright", specifier = ">=1.49,<2" },
     { name = "playwright-stealth", specifier = ">=2.0,<3" },
-    { name = "python-dotenv", specifier = ">=1.2.3" },
+    { name = "python-dotenv", marker = "extra == 'dev'", specifier = ">=1.2.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
 ]
 provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "wa-synergy", editable = "." }]
