@@ -2,7 +2,8 @@ ARG BUILD_FROM=python:3.13-slim-bookworm
 FROM ${BUILD_FROM}
 
 ARG BUILD_REF=main
-ENV PYTHONUNBUFFERED=1 \
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYTHONUNBUFFERED=1 \
     XDG_CACHE_HOME=/data/cache
 
 RUN python -m pip install --no-cache-dir \
