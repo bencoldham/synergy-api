@@ -67,8 +67,8 @@ class SynergyServiceClient:
         api_token: str,
     ) -> None:
         self._session = session
-        self._base_url = base_url.rstrip("/")
-        self._headers = {"Authorization": f"Bearer {api_token}"}
+        self._base_url = base_url.strip().rstrip("/")
+        self._headers = {"Authorization": f"Bearer {api_token.strip()}"}
 
     async def _request(self, path: str) -> Any:
         try:

@@ -1,0 +1,32 @@
+services:
+  synergy-app:
+    build:
+      context: .
+      dockerfile: ha_test/Dockerfile.app
+    command:
+      - /bin/sh
+      - -c
+      - python /harness/seed.py && exec python -m wa_synergy.service --options /data/options.json
+    volumes:
+      - synergy-app-data:/data
+      - ./ha_test/options.json:/data/options.json:ro
+      - ./ha_test/seed.py:/harness/seed.py:ro
+    ports:
+      - "18099:8099"
+
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:2026.9.0
+    depends_on:
+      - synergy-app
+    environment:
+      TZ: Australia/Perth
+    volumes:
+      - homeassistant-config:/config
+      - ./ha_test/configuration.yaml:/config/configuration.yaml:ro
+      - ./custom_components/wa_synergy:/config/custom_components/wa_synergy:ro
+    ports:
+      - "18123:8123"
+
+volumes:
+  synergy-app-data:
+  homeassistant-config:

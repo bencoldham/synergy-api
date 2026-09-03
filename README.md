@@ -76,3 +76,30 @@ AppDaemon is not used. It would still require a custom Chromium-capable image an
 would need privileged WebSocket access to Recorder's statistics import API, while
 adding a second framework and YAML configuration instead of a native config flow.
 
+## Home Assistant test stack
+
+`compose.ha-test.yaml` runs the integration against Home Assistant 2026.9 and a
+separate app container built from the current checkout. It does not contact
+Synergy: `ha_test/seed.py` writes deterministic interval data and the app starts
+with synchronization disabled.
+
+```console
+docker compose -f compose.ha-test.yaml up --build
+```
+
+Open `http://localhost:18123`, complete Home Assistant onboarding, and add the
+**WA Synergy** integration with:
+
+```text
+Service URL: http://synergy-app:8099
+API token:   ha-test-token-0123456789abcdef0123456789
+```
+
+The expected external statistic is
+`wa_synergy:001ha000000000test_grid_import`. Reset both persistent test volumes
+with:
+
+```console
+docker compose -f compose.ha-test.yaml down --volumes
+```
+

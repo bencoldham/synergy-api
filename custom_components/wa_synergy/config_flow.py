@@ -119,7 +119,7 @@ def _schema(values: dict[str, Any] | None) -> vol.Schema:
 def _normalized_url(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("service URL must be a string")
-    normalized = value.rstrip("/")
+    normalized = value.strip().rstrip("/")
     parsed = urlsplit(normalized)
     if (
         parsed.scheme not in {"http", "https"}

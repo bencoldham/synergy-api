@@ -1,0 +1,12 @@
+homeassistant:
+
+frontend:
+config:
+onboarding:
+recorder:
+energy:
+
+logger:
+  default: info
+  logs:
+    custom_components.wa_synergy: debug

@@ -1,0 +1,13 @@
+{
+  "email": "ha-test@gmail.com",
+  "password": "not-used",
+  "gmail_app_password": "not-used",
+  "api_token": "ha-test-token-0123456789abcdef0123456789",
+  "db_path": "/data/synergy.sqlite3",
+  "host": "0.0.0.0",
+  "port": 8099,
+  "sync_hours": 24,
+  "backfill_days": 1,
+  "refresh_days": 1,
+  "sync_on_start": false
+}

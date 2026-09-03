@@ -92,11 +92,13 @@ class SynergyService:
             days = self.settings.refresh_days if existing else self.settings.backfill_days
             end = datetime.now(_PERTH).date()
             current = end - timedelta(days=days)
+            refresh_cutoff = end - timedelta(days=self.settings.refresh_days)
             inserted = 0
             updated = 0
             unchanged = 0
             while current < end:
                 chunk_end = min(current + timedelta(days=_REQUEST_DAYS), end)
+                force_chunk = chunk_end > refresh_cutoff
                 result = sync_usage_to_db(
                     client=self._client,
                     query=UsageQuery(
@@ -105,7 +107,7 @@ class SynergyService:
                         interval_type="DAILY",
                     ),
                     db_path=self.settings.db_path,
-                    force=True,
+                    force=force_chunk,
                 )
                 inserted += result.inserted
                 updated += result.updated

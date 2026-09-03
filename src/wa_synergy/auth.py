@@ -11,10 +11,10 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import (
+    Browser,
     BrowserContext,
     Locator,
     Page,
@@ -63,8 +63,6 @@ _STEALTH = Stealth(
     navigator_languages_override=("en-AU", "en"),
     navigator_platform_override="Linux x86_64",
 )
-_PROFILE_DIR_NAME = "wa-synergy/chrome-profile"
-
 
 @dataclass(frozen=True, slots=True)
 class _AuthenticationResult:
@@ -339,14 +337,6 @@ def _authentication_result(
     )
 
 
-def _browser_profile_path() -> Path:
-    cache_root = os.environ.get("XDG_CACHE_HOME")
-    root = Path(cache_root) if cache_root else Path.home() / ".cache"
-    profile = root / _PROFILE_DIR_NAME
-    profile.mkdir(mode=0o700, parents=True, exist_ok=True)
-    profile.chmod(0o700)
-    return profile
-
 
 def _browser_user_agent(playwright: Playwright) -> str:
     raw = subprocess.check_output(
@@ -366,6 +356,7 @@ def _mint_with_playwright(
     *,
     headless: bool,
 ) -> _AuthenticationResult:
+    browser: Browser | None = None
     context: BrowserContext | None = None
     observed = _ObservedAuraCredentials()
     try:
@@ -378,10 +369,11 @@ def _mint_with_playwright(
             wayland_display = os.environ.get("WAYLAND_DISPLAY")
             if wayland_display:
                 launch_args.append("--ozone-platform=wayland")
-        context = playwright.chromium.launch_persistent_context(
-            str(_browser_profile_path()),
+        browser = playwright.chromium.launch(
             headless=headless,
             args=launch_args,
+        )
+        context = browser.new_context(
             user_agent=user_agent,
             locale="en-AU",
             timezone_id="Australia/Perth",
@@ -515,6 +507,9 @@ def _mint_with_playwright(
         if context is not None:
             with suppress(PlaywrightError):
                 context.close()
+        if browser is not None:
+            with suppress(PlaywrightError):
+                browser.close()
 
 
 def mint_http_credentials(

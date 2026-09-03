@@ -605,9 +605,4 @@ def fetch_usage(
         service_point_id=service_id,
         query=query,
     )
-    if not intervals:
-        raise UsageValidationError(
-            f"Synergy returned no usage intervals for service {service_id!r} "
-            f"from {query.start} to {query.end}; response: {response_text}"
-        )
     return intervals
