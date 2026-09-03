@@ -107,6 +107,20 @@ class SynergyClient:
             self._require_open()
             client, authentication = self._current_http_session()
             return fetch_usage(client, authentication, query)
+    def get_daily_usage(self, query: UsageQuery) -> tuple[UsageInterval, ...]:
+        """Fetch daily usage (hourly/half-hourly intervals) with the token captured during login."""
+        if not isinstance(query, UsageQuery):
+            raise ConfigurationError("get_daily_usage requires a UsageQuery")
+        if query.interval_type != "DAILY":
+            query = UsageQuery(
+                start=query.start,
+                end=query.end,
+                account_ids=query.account_ids,
+                service_point_ids=query.service_point_ids,
+                interval_type="DAILY",
+            )
+        return self.get_usage(query)
+
 
     def close(self) -> None:
         """Close and discard all direct-HTTP state; repeated calls are harmless."""

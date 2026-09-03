@@ -210,16 +210,29 @@ def _validate_devices(chart_data: dict[str, object]) -> None:
         raise UsageValidationError("ChartData Devices must not contain duplicates")
 
 
-def _validate_chart(ip_result: dict[str, object]) -> dict[str, object]:
+def _validate_chart(
+    ip_result: dict[str, object],
+    *,
+    expected_interval_type: str | None = None,
+) -> dict[str, object]:
     if ip_result.get("ChartType") != "INTERVAL_DATA":
         raise UsageValidationError(
             f"IPResult ChartType is {ip_result.get('ChartType')!r}; "
             f"expected 'INTERVAL_DATA'"
         )
-    if ip_result.get("IntervalType") != "MONTH":
+    actual_interval_type = ip_result.get("IntervalType")
+    if actual_interval_type not in ("DAILY", "MONTH"):
         raise UsageValidationError(
-            f"IPResult IntervalType is {ip_result.get('IntervalType')!r}; "
-            f"expected 'MONTH'"
+            f"IPResult IntervalType is {actual_interval_type!r}; "
+            f"expected 'DAILY' or 'MONTH'"
+        )
+    if (
+        expected_interval_type is not None
+        and actual_interval_type != expected_interval_type
+    ):
+        raise UsageValidationError(
+            f"IPResult IntervalType is {actual_interval_type!r}; "
+            f"expected {expected_interval_type!r}"
         )
     chart_data = _required_object(ip_result, "ChartData", state="IPResult")
     if chart_data.get("errorCode") != "INVOKE-200" or chart_data.get("error") != "OK":
@@ -338,7 +351,10 @@ def normalize_usage_response(
         query=query,
     )
     _validate_provider_unit(provider_unit)
-    chart_data = _validate_chart(_decode_usage_response(response_text))
+    chart_data = _validate_chart(
+        _decode_usage_response(response_text),
+        expected_interval_type=query.interval_type,
+    )
     response = chart_data.get("Response")
     if not isinstance(response, list):
         raise UsageValidationError("ChartData Response must be a list")
@@ -442,26 +458,48 @@ def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
     end_ymd = inclusive_end_date.strftime("%Y%m%d")
     start_iso = start_date.isoformat()
     end_iso = inclusive_end_date.isoformat()
-    procedure_input = {
-        "StartDate": start_ymd,
-        "EndDate": end_ymd,
-        "ServiceId": service_point_id,
-        "IntervalType": "MONTH",
-        "ChartType": "INTERVAL_DATA",
-        "Interval": "",
-        "Daily": "X",
-        "Monthly": "",
-        "DisplayOptionValue": "Other",
-        "Device": [],
-        "PeriodStartDate": start_iso,
-        "PeriodEndDate": end_iso,
-        "PreviousMeters": [],
-        "UnbilledStartDate": start_iso,
-        "UnbilledEndDate": end_iso,
-        "AmiMeterCount": 1,
-        "OtherStartDate": start_iso,
-        "OtherEndDate": end_iso,
-    }
+    if query.interval_type == "DAILY":
+        procedure_input = {
+            "StartDate": start_ymd,
+            "EndDate": end_ymd,
+            "ServiceId": service_point_id,
+            "IntervalType": "DAILY",
+            "ChartType": "INTERVAL_DATA",
+            "Interval": "X",
+            "Daily": "",
+            "Monthly": "",
+            "DisplayOptionValue": "Daily",
+            "Device": [],
+            "PeriodStartDate": start_iso,
+            "PeriodEndDate": end_iso,
+            "PreviousMeters": [],
+            "UnbilledStartDate": start_iso,
+            "UnbilledEndDate": end_iso,
+            "AmiMeterCount": 1,
+            "OtherStartDate": f"{start_iso}T00:00:00.000Z",
+            "OtherEndDate": f"{end_iso}T00:00:00.000Z",
+        }
+    else:
+        procedure_input = {
+            "StartDate": start_ymd,
+            "EndDate": end_ymd,
+            "ServiceId": service_point_id,
+            "IntervalType": "MONTH",
+            "ChartType": "INTERVAL_DATA",
+            "Interval": "",
+            "Daily": "X",
+            "Monthly": "",
+            "DisplayOptionValue": "Other",
+            "Device": [],
+            "PeriodStartDate": start_iso,
+            "PeriodEndDate": end_iso,
+            "PreviousMeters": [],
+            "UnbilledStartDate": start_iso,
+            "UnbilledEndDate": end_iso,
+            "AmiMeterCount": 1,
+            "OtherStartDate": start_iso,
+            "OtherEndDate": end_iso,
+        }
     return _apex_action_message(
         controller=_USAGE_CONTROLLER,
         method=_USAGE_METHOD,
