@@ -18,7 +18,7 @@ credentials = SynergyCredentials(
 )
 query = UsageQuery(
     start="2026-07-01",
-    end="2026-08-01",
+    end="2030-08-01",
     # account_ids=("provider-account-id",),
     # service_point_ids=("provider-service-id",),
 )

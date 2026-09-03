@@ -9,7 +9,7 @@ import httpx
 
 from .auth import _AuthenticationResult, mint_http_credentials
 from .config import SynergyCredentials
-from .errors import ConfigurationError, UsageFetchError
+from .errors import ConfigurationError, SessionExpiredError, UsageFetchError
 from .models import UsageInterval, UsageQuery
 from .usage import create_http_client, fetch_usage
 
@@ -31,16 +31,11 @@ class SynergyClient:
         *,
         credentials: SynergyCredentials,
         headless: bool = True,
-        interactive_auth: bool | None = None,
     ) -> None:
         if not isinstance(credentials, SynergyCredentials):
             raise ConfigurationError("SynergyClient requires SynergyCredentials")
         if not isinstance(headless, bool):
             raise ConfigurationError("headless must be boolean")
-        if interactive_auth is not None:
-            if not isinstance(interactive_auth, bool):
-                raise ConfigurationError("interactive_auth must be boolean")
-            headless = not interactive_auth
         self._credentials = credentials
         self._headless = headless
         self._operation_lock = RLock()
@@ -65,10 +60,6 @@ class SynergyClient:
     def headless(self) -> bool:
         return self._headless
 
-    @property
-    def interactive_auth(self) -> bool:
-        return not self._headless
-
     def _require_open(self) -> None:
         if self._closed:
             raise UsageFetchError("SynergyClient is closed")
@@ -80,47 +71,34 @@ class SynergyClient:
         if client is not None:
             client.close()
 
-    def _mint_http_session(self) -> None:
-        authentication = mint_http_credentials(
-            self._credentials,
-            headless=self._headless,
-        )
-        client = create_http_client(authentication)
-        self._authentication = authentication
-        self._http_client = client
-
     def _current_http_session(self) -> tuple[httpx.Client, _AuthenticationResult]:
-        if self._http_client is None or self._authentication is None:
-            self._mint_http_session()
-        client = self._http_client
-        authentication = self._authentication
-        if client is None or authentication is None:
-            raise UsageFetchError("Direct HTTP session could not be created")
-        return client, authentication
+        if self._http_client is None:
+            authentication = mint_http_credentials(
+                self._credentials,
+                headless=self._headless,
+            )
+            self._http_client = create_http_client(authentication)
+            self._authentication = authentication
+
+        assert self._authentication is not None
+        return self._http_client, self._authentication
 
     def get_usage(self, query: UsageQuery) -> tuple[UsageInterval, ...]:
-        """Fetch usage with the token captured during login."""
+        """Fetch usage, reminting credentials once after confirmed session loss."""
 
         if not isinstance(query, UsageQuery):
             raise ConfigurationError("get_usage requires a UsageQuery")
         with self._operation_lock:
             self._require_open()
-            client, authentication = self._current_http_session()
-            return fetch_usage(client, authentication, query)
-    def get_daily_usage(self, query: UsageQuery) -> tuple[UsageInterval, ...]:
-        """Fetch daily usage (hourly/half-hourly intervals) with the token captured during login."""
-        if not isinstance(query, UsageQuery):
-            raise ConfigurationError("get_daily_usage requires a UsageQuery")
-        if query.interval_type != "DAILY":
-            query = UsageQuery(
-                start=query.start,
-                end=query.end,
-                account_ids=query.account_ids,
-                service_point_ids=query.service_point_ids,
-                interval_type="DAILY",
-            )
-        return self.get_usage(query)
-
+            for attempt in range(2):
+                client, authentication = self._current_http_session()
+                try:
+                    return fetch_usage(client, authentication, query)
+                except SessionExpiredError:
+                    self._discard_http_session()
+                    if attempt == 1:
+                        raise
+            raise AssertionError("unreachable")
 
     def close(self) -> None:
         """Close and discard all direct-HTTP state; repeated calls are harmless."""

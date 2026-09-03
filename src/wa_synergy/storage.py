@@ -7,7 +7,7 @@ import re
 import sqlite3
 import stat
 from collections.abc import Iterable
-from contextlib import suppress
+from contextlib import closing
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,9 +22,13 @@ _TABLE_NAME_PATTERN = re.compile(r"\A[a-z][a-z0-9_]*\Z")
 
 
 def _validate_table_name(table_name: str) -> str:
-    if not isinstance(table_name, str) or _TABLE_NAME_PATTERN.fullmatch(table_name) is None:
+    if (
+        not isinstance(table_name, str)
+        or _TABLE_NAME_PATTERN.fullmatch(table_name) is None
+    ):
         raise StorageError(f"Invalid SQLite table name: {table_name!r}")
     return table_name
+
 
 _CREATE_INCOMING = """
 CREATE TEMP TABLE incoming_usage (
@@ -74,6 +78,7 @@ AND u.channel = i.channel
 AND u.interval_start_utc = i.interval_start_utc
 AND u.interval_end_utc = i.interval_end_utc
 """
+
 
 def _count_inserted_sql(table_name: str) -> str:
     return f"""
@@ -129,6 +134,8 @@ ON CONFLICT DO UPDATE SET
     source_updated_at_utc = excluded.source_updated_at_utc,
     fetched_at_utc = excluded.fetched_at_utc
 """
+
+
 def _canonical_datetime(value: datetime, *, field: str) -> str:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ConfigurationError(f"{field} must be a timezone-aware datetime")
@@ -222,6 +229,7 @@ ON {table_name} (
 """)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
+
 def _deduplicate(
     intervals: Iterable[UsageInterval],
 ) -> tuple[UsageInterval, ...]:
@@ -278,7 +286,6 @@ def upsert_usage_intervals(
     is collapsed; a duplicate identity with different values rejects the full batch.
     ``fetched_at_utc`` is refreshed for unchanged rows without counting them as updated.
     """
-
     path = _validated_path(db_path)
     _validate_table_name(table_name)
     fetched_at = _canonical_datetime(fetched_at_utc, field="fetched_at_utc")
@@ -286,9 +293,7 @@ def upsert_usage_intervals(
     incoming_rows = tuple(_incoming_row(record, fetched_at) for record in records)
     _prepare_database_file(path)
 
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = sqlite3.connect(path, isolation_level=None)
+    with closing(sqlite3.connect(path, isolation_level=None)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
         _initialize_schema(connection, table_name=table_name)
         connection.execute(_CREATE_INCOMING)
@@ -300,23 +305,13 @@ def upsert_usage_intervals(
             raise StorageError("SQLite persistence outcomes could not be determined")
         inserted = int(inserted_row[0])
         updated = int(updated_row[0])
-        unchanged = len(records) - inserted - updated
-
         connection.execute(_merge_incoming_sql(table_name))
-        connection.commit()
-        return SyncResult(
-            inserted=inserted,
-            updated=updated,
-            unchanged=unchanged,
-        )
-    except sqlite3.Error:
-        if connection is not None:
-            with suppress(sqlite3.Error):
-                connection.rollback()
-        raise
-    finally:
-        if connection is not None:
-            connection.close()
+
+    return SyncResult(
+        inserted=inserted,
+        updated=updated,
+        unchanged=len(records) - inserted - updated,
+    )
 
 
 def get_stored_days(
@@ -341,36 +336,115 @@ def get_stored_days(
             if not table_exists:
                 return set()
 
+            where_clause = ""
+            parameters: tuple[object, ...] = (min_slots,)
             if service_point_ids:
                 placeholders = ",".join("?" for _ in service_point_ids)
-                query = f"""
-                    SELECT date(interval_start_utc, '+8 hours') AS val_day,
-                           COUNT(DISTINCT interval_start_utc) AS slot_count
-                    FROM {table_name}
-                    WHERE service_point_id IN ({placeholders})
-                    GROUP BY val_day
-                    HAVING slot_count >= ?
-                """
-                rows = connection.execute(
-                    query, (*service_point_ids, min_slots)
-                ).fetchall()
-            else:
-                query = f"""
-                    SELECT date(interval_start_utc, '+8 hours') AS val_day,
-                           COUNT(DISTINCT interval_start_utc) AS slot_count
-                    FROM {table_name}
-                    GROUP BY val_day
-                    HAVING slot_count >= ?
-                """
-                rows = connection.execute(query, (min_slots,)).fetchall()
+                where_clause = f"WHERE service_point_id IN ({placeholders})"
+                parameters = (*service_point_ids, min_slots)
+
+            rows = connection.execute(
+                f"""
+                SELECT date(interval_start_utc, '+8 hours') AS val_day,
+                       COUNT(DISTINCT interval_start_utc) AS slot_count
+                FROM {table_name}
+                {where_clause}
+                GROUP BY val_day
+                HAVING slot_count >= ?
+                """,
+                parameters,
+            ).fetchall()
 
             today_perth = datetime.now(_PERTH).date()
             return {
-                date.fromisoformat(r[0])
-                for r in rows
-                if date.fromisoformat(r[0]) < today_perth
+                day for row in rows if (day := date.fromisoformat(row[0])) < today_perth
             }
     except sqlite3.Error as exc:
         raise StorageError(
             f"Failed to query stored usage days from {path}: {exc}"
         ) from exc
+
+
+def get_usage_intervals(
+    db_path: Path,
+    *,
+    table_name: str = "daily_usage_intervals",
+    start: datetime | None = None,
+    end: datetime | None = None,
+    service_point_ids: tuple[str, ...] = (),
+) -> tuple[UsageInterval, ...]:
+    """Read normalized intervals from SQLite in stable identity order."""
+
+    path = _validated_path(db_path)
+    if not path.exists():
+        return ()
+    _validate_table_name(table_name)
+
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if start is not None:
+        clauses.append("interval_start_utc >= ?")
+        parameters.append(_canonical_datetime(start, field="start"))
+    if end is not None:
+        clauses.append("interval_start_utc < ?")
+        parameters.append(_canonical_datetime(end, field="end"))
+    if service_point_ids:
+        placeholders = ",".join("?" for _ in service_point_ids)
+        clauses.append(f"service_point_id IN ({placeholders})")
+        parameters.extend(service_point_ids)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    try:
+        with sqlite3.connect(path) as connection:
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            if not table_exists:
+                return ()
+            rows = connection.execute(
+                f"""
+                SELECT account_id,
+                       service_point_id,
+                       meter_id,
+                       channel,
+                       interval_start_utc,
+                       interval_end_utc,
+                       consumption_kwh,
+                       quality,
+                       source_updated_at_utc
+                FROM {table_name}
+                {where_clause}
+                ORDER BY account_id,
+                         service_point_id,
+                         COALESCE(meter_id, ''),
+                         interval_start_utc,
+                         channel,
+                         interval_end_utc
+                """,
+                parameters,
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise StorageError(
+            f"Failed to read stored usage intervals from {path}: {exc}"
+        ) from exc
+
+    def parsed_datetime(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    return tuple(
+        UsageInterval(
+            account_id=row[0],
+            service_point_id=row[1],
+            meter_id=row[2],
+            channel=row[3],
+            interval_start=parsed_datetime(row[4]),
+            interval_end=parsed_datetime(row[5]),
+            consumption_kwh=Decimal(row[6]),
+            quality=row[7],
+            source_updated_at=(
+                parsed_datetime(row[8]) if row[8] is not None else None
+            ),
+        )
+        for row in rows
+    )

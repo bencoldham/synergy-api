@@ -13,18 +13,13 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .errors import (
-    AuthenticationContractError,
-    UsageFetchError,
-    UsageValidationError,
-)
+from .errors import SessionExpiredError, UsageFetchError, UsageValidationError
 from .models import UsageInterval, UsageQuery
 
 if TYPE_CHECKING:
     from .auth import _AuthenticationResult
 
 _PERTH = ZoneInfo("Australia/Perth")
-_PROVIDER_UNIT = "KWH"
 _IMPORT_CHANNELS = frozenset({"OFF_PEAK", "PEAK", "SUPER_OFFPEAK"})
 _ROW_FIELDS = frozenset({"BillingStatus", "VAL_DAY"})
 _DECIMAL_STRING = re.compile(r"[+-]?\d+(?:\.\d{1,3})?\Z")
@@ -129,13 +124,6 @@ def _validate_context(
         )
 
 
-def _validate_provider_unit(provider_unit: str) -> None:
-    if provider_unit != _PROVIDER_UNIT:
-        raise UsageValidationError(
-            f"Provider usage unit is {provider_unit!r}; expected {_PROVIDER_UNIT!r}"
-        )
-
-
 def _parse_day(value: object) -> date:
     if not isinstance(value, str):
         raise UsageValidationError("Usage row VAL_DAY must be a YYYY-MM-DD string")
@@ -154,9 +142,13 @@ def _parse_day(value: object) -> date:
 
 def _parse_time(value: object) -> time:
     if not isinstance(value, str) or len(value) != 4 or not value.isascii():
-        raise UsageValidationError(f"Usage row VAL_TIME must use HHMM format, got {value!r}")
+        raise UsageValidationError(
+            f"Usage row VAL_TIME must use HHMM format, got {value!r}"
+        )
     if not value.isdigit():
-        raise UsageValidationError(f"Usage row VAL_TIME must use HHMM format, got {value!r}")
+        raise UsageValidationError(
+            f"Usage row VAL_TIME must use HHMM format, got {value!r}"
+        )
     hour = int(value[:2])
     minute = int(value[2:])
     if hour > 23 or minute not in (0, 30):
@@ -164,6 +156,7 @@ def _parse_time(value: object) -> time:
             f"Usage row VAL_TIME must identify a 30-minute boundary, got {value!r}"
         )
     return time(hour=hour, minute=minute)
+
 
 def _parse_quantity(value: object, *, field: str) -> Decimal:
     if isinstance(value, Decimal):
@@ -341,7 +334,6 @@ def normalize_usage_response(
     account_id: str,
     service_point_id: str,
     query: UsageQuery,
-    provider_unit: str = _PROVIDER_UNIT,
 ) -> tuple[UsageInterval, ...]:
     """Validate one complete Aura usage response and return normalized records."""
 
@@ -350,7 +342,6 @@ def normalize_usage_response(
         service_point_id=service_point_id,
         query=query,
     )
-    _validate_provider_unit(provider_unit)
     chart_data = _validate_chart(
         _decode_usage_response(response_text),
         expected_interval_type=query.interval_type,
@@ -386,18 +377,6 @@ def normalize_usage_response(
     return merge_usage_intervals(intervals)
 
 
-def _require_closed_authentication(authentication: _AuthenticationResult) -> None:
-    if (
-        not getattr(authentication, "browser_closed", False)
-        or not getattr(authentication, "sid", None)
-        or not getattr(authentication, "aura_token", None)
-        or not getattr(authentication, "aura_context", None)
-    ):
-        raise AuthenticationContractError(
-            "Direct HTTP requests require closed-browser authentication material"
-        )
-
-
 def create_http_client(
     authentication: _AuthenticationResult,
     *,
@@ -405,12 +384,6 @@ def create_http_client(
 ) -> httpx.Client:
     """Create a memory-only direct client containing only the captured ``sid`` cookie."""
 
-    _require_closed_authentication(authentication)
-    hostname = urlsplit(_PORTAL_ORIGIN).hostname
-    if hostname is None:
-        raise AuthenticationContractError(
-            "Direct HTTP portal origin does not contain a hostname"
-        )
     client = httpx.Client(
         base_url=_PORTAL_ORIGIN,
         follow_redirects=False,
@@ -422,7 +395,7 @@ def create_http_client(
     client.cookies.set(
         "sid",
         authentication.sid,
-        domain=hostname,
+        domain="my.synergy.net.au",
         path="/",
     )
     return client
@@ -458,48 +431,40 @@ def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
     end_ymd = inclusive_end_date.strftime("%Y%m%d")
     start_iso = start_date.isoformat()
     end_iso = inclusive_end_date.isoformat()
+
     if query.interval_type == "DAILY":
-        procedure_input = {
-            "StartDate": start_ymd,
-            "EndDate": end_ymd,
-            "ServiceId": service_point_id,
-            "IntervalType": "DAILY",
-            "ChartType": "INTERVAL_DATA",
-            "Interval": "X",
-            "Daily": "",
-            "Monthly": "",
-            "DisplayOptionValue": "Daily",
-            "Device": [],
-            "PeriodStartDate": start_iso,
-            "PeriodEndDate": end_iso,
-            "PreviousMeters": [],
-            "UnbilledStartDate": start_iso,
-            "UnbilledEndDate": end_iso,
-            "AmiMeterCount": 1,
-            "OtherStartDate": f"{start_iso}T00:00:00.000Z",
-            "OtherEndDate": f"{end_iso}T00:00:00.000Z",
-        }
+        interval_marker = "X"
+        daily_marker = ""
+        display_option = "Daily"
+        other_start = f"{start_iso}T00:00:00.000Z"
+        other_end = f"{end_iso}T00:00:00.000Z"
     else:
-        procedure_input = {
-            "StartDate": start_ymd,
-            "EndDate": end_ymd,
-            "ServiceId": service_point_id,
-            "IntervalType": "MONTH",
-            "ChartType": "INTERVAL_DATA",
-            "Interval": "",
-            "Daily": "X",
-            "Monthly": "",
-            "DisplayOptionValue": "Other",
-            "Device": [],
-            "PeriodStartDate": start_iso,
-            "PeriodEndDate": end_iso,
-            "PreviousMeters": [],
-            "UnbilledStartDate": start_iso,
-            "UnbilledEndDate": end_iso,
-            "AmiMeterCount": 1,
-            "OtherStartDate": start_iso,
-            "OtherEndDate": end_iso,
-        }
+        interval_marker = ""
+        daily_marker = "X"
+        display_option = "Other"
+        other_start = start_iso
+        other_end = end_iso
+
+    procedure_input = {
+        "StartDate": start_ymd,
+        "EndDate": end_ymd,
+        "ServiceId": service_point_id,
+        "IntervalType": query.interval_type,
+        "ChartType": "INTERVAL_DATA",
+        "Interval": interval_marker,
+        "Daily": daily_marker,
+        "Monthly": "",
+        "DisplayOptionValue": display_option,
+        "Device": [],
+        "PeriodStartDate": start_iso,
+        "PeriodEndDate": end_iso,
+        "PreviousMeters": [],
+        "UnbilledStartDate": start_iso,
+        "UnbilledEndDate": end_iso,
+        "AmiMeterCount": 1,
+        "OtherStartDate": other_start,
+        "OtherEndDate": other_end,
+    }
     return _apex_action_message(
         controller=_USAGE_CONTROLLER,
         method=_USAGE_METHOD,
@@ -513,6 +478,44 @@ def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
     )
 
 
+def _contains_invalid_session_error(value: object) -> bool:
+    if isinstance(value, str):
+        return "access to the apex class named" in value.casefold()
+    if isinstance(value, dict):
+        return any(_contains_invalid_session_error(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_invalid_session_error(item) for item in value)
+    return False
+
+
+def _is_invalid_session_payload(response_text: str) -> bool:
+    try:
+        ip_result = _decode_usage_response(response_text)
+    except UsageValidationError:
+        return False
+    return (
+        "ChartData" not in ip_result
+        and set(ip_result) <= {"success", "error"}
+        and _contains_invalid_session_error(ip_result)
+    )
+
+
+def _is_login_redirect(response: httpx.Response) -> bool:
+    location = response.headers.get("location")
+    if not response.is_redirect or not isinstance(location, str):
+        return False
+    return urlsplit(location).path.rstrip("/") == "/s/login"
+
+
+def _looks_like_login_html(response_text: str) -> bool:
+    folded = response_text.casefold()
+    return (
+        "<html" in folded
+        and 'type="password"' in folded
+        and ("log in" in folded or "login" in folded)
+    )
+
+
 def _post_aura(
     client: httpx.Client,
     authentication: _AuthenticationResult,
@@ -522,35 +525,50 @@ def _post_aura(
     controller: str,
     method: str,
 ) -> str:
-    _require_closed_authentication(authentication)
-    response = client.post(
-        _AURA_PATH,
-        params=_AURA_EXECUTE_QUERY,
-        headers={
-            "X-SFDC-LDS-Endpoints": (
-                f"ApexActionController.execute:{controller}.{method}"
-            )
-        },
-        data={
-            "message": message,
-            "aura.context": authentication.aura_context,
-            "aura.token": authentication.aura_token,
-        },
-    )
+    try:
+        response = client.post(
+            _AURA_PATH,
+            params=_AURA_EXECUTE_QUERY,
+            headers={
+                "X-SFDC-LDS-Endpoints": (
+                    f"ApexActionController.execute:{controller}.{method}"
+                )
+            },
+            data={
+                "message": message,
+                "aura.context": authentication.aura_context,
+                "aura.token": authentication.aura_token,
+            },
+        )
+    except httpx.HTTPError as exc:
+        raise UsageFetchError(f"Synergy {state} request failed: {exc}") from exc
 
-    response.raise_for_status()
+    if response.status_code == 401 or _is_login_redirect(response):
+        raise SessionExpiredError("Synergy direct session expired")
+    if _is_invalid_session_payload(response.text):
+        raise SessionExpiredError("Synergy direct session was rejected")
+
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise UsageFetchError(
+            f"Synergy {state} request failed with HTTP {response.status_code}"
+        ) from exc
+
     content_type = response.headers.get("content-type", "")
-    if content_type.partition(";")[0].strip().lower() != "application/json":
+    media_type = content_type.partition(";")[0].strip().lower()
+    if media_type != "application/json":
+        if media_type == "text/html" and _looks_like_login_html(response.text):
+            raise SessionExpiredError("Synergy direct session returned the login page")
         raise UsageValidationError(
             f"Synergy {state} response has content type {content_type!r}, "
-            f"expected application/json; body: {response.text!r}"
+            "expected application/json"
         )
     try:
         json.loads(response.text)
     except json.JSONDecodeError as exc:
-        raise UsageFetchError(
-            f"Synergy {state} response was not valid JSON: {exc}; "
-            f"body: {response.text!r}"
+        raise SessionExpiredError(
+            "Synergy direct session returned an invalid Aura response"
         ) from exc
     return response.text
 
@@ -566,7 +584,6 @@ def fetch_usage(
         raise UsageFetchError("Direct usage retrieval requires an httpx client")
     if not isinstance(query, UsageQuery):
         raise UsageValidationError("Direct usage retrieval requires a UsageQuery")
-    _require_closed_authentication(authentication)
 
     service_id = authentication.service_id
     response_text = _post_aura(

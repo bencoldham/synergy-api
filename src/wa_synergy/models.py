@@ -93,7 +93,9 @@ class UsageQuery:
         end = _query_date(self.end, field="end")
         if end <= start:
             raise ConfigurationError("UsageQuery end must be later than start")
-        if not isinstance(self.interval_type, str) or self.interval_type.upper() not in (
+        if not isinstance(
+            self.interval_type, str
+        ) or self.interval_type.upper() not in (
             "DAILY",
             "MONTH",
         ):
@@ -113,6 +115,7 @@ class UsageQuery:
             "service_point_ids",
             _identifier_filter(self.service_point_ids, field="service_point_ids"),
         )
+
 
 @dataclass(frozen=True, slots=True)
 class UsageInterval:

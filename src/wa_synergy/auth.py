@@ -9,13 +9,12 @@ import secrets
 import subprocess
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import (
-    Browser,
     BrowserContext,
     Locator,
     Page,
@@ -75,7 +74,6 @@ class _AuthenticationResult:
     aura_token: str = field(repr=False)
     aura_context: str = field(repr=False)
     service_id: str
-    browser_closed: bool = field(default=False, repr=False)
 
 
 @dataclass(slots=True)
@@ -193,7 +191,6 @@ def _wait_for_state(
         page.wait_for_timeout(min(_STATE_POLL_MS, remaining_ms))
 
 
-
 def _move_pointer(page: Page, control: Locator) -> tuple[float, float]:
     box = control.bounding_box()
     if box is None:
@@ -240,7 +237,7 @@ def _human_fill(page: Page, control: Locator, value: str) -> None:
     page.wait_for_timeout(100 + secrets.randbelow(301))
 
 
-def _submit_humanized_login(page: Page, credentials: SynergyCredentials) -> None:
+def _submit_login(page: Page, credentials: SynergyCredentials) -> None:
     email, password, submit = _login_controls(page)
     if not all(_is_visible(control) for control in (email, password, submit)):
         raise AuthenticationContractError("Synergy login controls changed")
@@ -263,27 +260,6 @@ def _submit_repeated_login(page: Page, credentials: SynergyCredentials) -> None:
         page.wait_for_timeout(180 + secrets.randbelow(221))
         if urlsplit(page.url).path.rstrip("/") != "/s/login":
             return
-
-
-def _fill_login(page: Page, credentials: SynergyCredentials) -> Locator:
-    email, password, submit = _login_controls(page)
-    if not all(_is_visible(control) for control in (email, password, submit)):
-        raise AuthenticationContractError("Synergy login controls changed")
-    email.fill(credentials.email)
-    password.fill(credentials.password)
-    return submit
-
-
-def _submit_login(
-    page: Page,
-    credentials: SynergyCredentials,
-    *,
-    humanized: bool = True,
-) -> None:
-    if humanized:
-        _submit_humanized_login(page, credentials)
-    else:
-        _fill_login(page, credentials).click()
 
 
 def _submit_otp_method(page: Page) -> None:
@@ -371,47 +347,26 @@ def _browser_profile_path() -> Path:
     profile.chmod(0o700)
     return profile
 
+
 def _browser_user_agent(playwright: Playwright) -> str:
-    try:
-        raw = subprocess.check_output(
-            [playwright.chromium.executable_path, "--version"],
-            text=True,
-        )
-        version = raw.strip().split()[-1]
-    except Exception:
-        version = "151.0.0.0"
+    raw = subprocess.check_output(
+        [playwright.chromium.executable_path, "--version"],
+        text=True,
+    )
+    version = raw.strip().split()[-1]
     return (
-        f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
         f"Chrome/{version} Safari/537.36"
     )
-
-
-
-def _close_browser(
-    page: Page | None,
-    context: BrowserContext | None,
-    browser: Browser | None,
-) -> None:
-    if page is not None:
-        with suppress(PlaywrightError):
-            page.close()
-    if context is not None:
-        with suppress(PlaywrightError):
-            context.close()
-    if browser is not None:
-        with suppress(PlaywrightError):
-            browser.close()
 
 
 def _mint_with_playwright(
     playwright: Playwright,
     credentials: SynergyCredentials,
     *,
-    headless: bool = True,
+    headless: bool,
 ) -> _AuthenticationResult:
-    browser: Browser | None = None
     context: BrowserContext | None = None
-    page: Page | None = None
     observed = _ObservedAuraCredentials()
     try:
         user_agent = _browser_user_agent(playwright)
@@ -463,7 +418,7 @@ def _mint_with_playwright(
             return _authentication_result(page, context, observed)
 
         with gmail_otp_mailbox(credentials) as mailbox:
-            _submit_login(page, credentials, humanized=True)
+            _submit_login(page, credentials)
             post_login_states = frozenset(
                 {
                     _AuthState.AUTHENTICATED,
@@ -557,14 +512,15 @@ def _mint_with_playwright(
 
             return _authentication_result(page, context, observed)
     finally:
-        _close_browser(page, context, browser)
+        if context is not None:
+            with suppress(PlaywrightError):
+                context.close()
 
 
 def mint_http_credentials(
     credentials: SynergyCredentials,
     *,
     headless: bool = True,
-    interactive: bool | None = None,
 ) -> _AuthenticationResult:
     """Mint direct-HTTP credentials, closing all Playwright state before return."""
 
@@ -572,14 +528,10 @@ def mint_http_credentials(
         raise AuthenticationError("Synergy authentication requires valid credentials")
     if not isinstance(headless, bool):
         raise AuthenticationError("Synergy headless parameter must be boolean")
-    if interactive is not None:
-        if not isinstance(interactive, bool):
-            raise AuthenticationError("Synergy interactive authentication must be boolean")
-        headless = not interactive
     with sync_playwright() as playwright:
         result = _mint_with_playwright(
             playwright,
             credentials,
             headless=headless,
         )
-    return replace(result, browser_closed=True)
+    return result
