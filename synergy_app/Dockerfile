@@ -1,7 +1,13 @@
 ARG BUILD_FROM=python:3.13-slim-bookworm
 FROM ${BUILD_FROM}
 
+ARG BUILD_ARCH
 ARG BUILD_REF=main
+ARG BUILD_VERSION
+LABEL \
+    io.hass.arch="${BUILD_ARCH}" \
+    io.hass.type="app" \
+    io.hass.version="${BUILD_VERSION}"
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PYTHONUNBUFFERED=1 \
     XDG_CACHE_HOME=/data/cache

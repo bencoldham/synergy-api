@@ -1,5 +1,5 @@
 name: WA Synergy
-version: "0.1.5"
+version: "0.1.6"
 slug: wa_synergy
 description: Fetch delayed WA Synergy usage for Home Assistant
 url: https://github.com/bencoldham/synergy-api
@@ -8,7 +8,7 @@ arch:
   - aarch64
 startup: application
 boot: auto
-init: false
+init: true
 ports:
   8099/tcp: 8099
 ports_description:

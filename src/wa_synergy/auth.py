@@ -43,6 +43,7 @@ _DASHBOARD_PATH = "/s/service-dashboard"
 _STATE_TIMEOUT_MS = 30_000
 _STATE_POLL_MS = 100
 _LOGIN_RETRY_STABILITY_MS = 2_000
+_NAVIGATION_RETRY_MS = 2_000
 _AUTH_MATERIAL_TIMEOUT_MS = 30_000
 _AURA_CONTEXT_KEYS = frozenset(
     {"mode", "fwuid", "app", "loaded", "dn", "globals", "uad"}
@@ -110,6 +111,21 @@ class _AuthState(Enum):
     REJECTED = auto()
     CAPTCHA = auto()
     RETRYABLE_LOGIN = auto()
+
+
+def _goto_login(page: Page) -> None:
+    for attempt in range(2):
+        try:
+            page.goto(
+                _LOGIN_URL,
+                wait_until="domcontentloaded",
+                timeout=_STATE_TIMEOUT_MS,
+            )
+            return
+        except PlaywrightError:
+            if attempt == 1:
+                raise
+            page.wait_for_timeout(_NAVIGATION_RETRY_MS)
 
 
 def _is_visible(locator: Locator) -> bool:
@@ -399,7 +415,7 @@ def _mint_with_playwright(
             "request",
             lambda request: observed.observe(request, page_url=page.url),
         )
-        page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=_STATE_TIMEOUT_MS)
+        _goto_login(page)
 
         initial_state = _wait_for_state(
             page,

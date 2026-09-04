@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import threading
+import traceback
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -29,6 +30,18 @@ from .sync import sync_usage_to_db
 _LOGGER = logging.getLogger(__name__)
 _PERTH = ZoneInfo("Australia/Perth")
 _REQUEST_DAYS = 31
+
+
+def _log_sync_failure(exc: SynergyError) -> None:
+    detail = str(exc)
+    _LOGGER.error(
+        "Synchronization failed: %s",
+        detail.splitlines()[0] if detail else type(exc).__name__,
+    )
+    for section in traceback.format_exception(exc):
+        for line in section.splitlines():
+            if line:
+                _LOGGER.error("%s", line)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +146,7 @@ class SynergyService:
         except SynergyError as exc:
             with self._state_lock:
                 self._last_error = type(exc).__name__
-            _LOGGER.exception("Synchronization failed: %s", exc)
+            _log_sync_failure(exc)
             raise
         finally:
             with self._state_lock:

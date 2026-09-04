@@ -68,7 +68,7 @@ def _compose_output(*arguments: str) -> str:
 
 
 def _compose_logs() -> str:
-    return _compose_output("logs", "--timestamps")
+    return _compose_output("logs", "--timestamps", "synergy-app")
 
 
 def _runtime(*arguments: str) -> str:
@@ -143,6 +143,16 @@ def _exercise_live_network_failure() -> None:
     if not container_id:
         raise RuntimeError("cannot identify the running companion service container")
     inspected = json.loads(_runtime("inspect", container_id))
+    labels = inspected[0]["Config"]["Labels"]
+    expected_labels = {
+        "io.hass.arch": "amd64",
+        "io.hass.type": "app",
+        "io.hass.version": "0.1.6",
+    }
+    if any(labels.get(key) != value for key, value in expected_labels.items()):
+        raise RuntimeError(
+            f"companion image has invalid Home Assistant labels: {labels}"
+        )
     networks = tuple(inspected[0]["NetworkSettings"]["Networks"])
     if len(networks) != 1:
         raise RuntimeError(
@@ -161,6 +171,10 @@ def _exercise_live_network_failure() -> None:
         )
         if _SYNC_THREAD_CRASH in failure_logs:
             raise RuntimeError("synergy-sync thread crashed during network outage")
+        if "| ERROR    | Traceback (most recent call last):" not in failure_logs:
+            raise RuntimeError(
+                "companion traceback lines have no application timestamp"
+            )
     finally:
         _runtime("stop", container_id)
         _runtime("network", "connect", network, container_id)
