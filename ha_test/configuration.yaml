@@ -1,4 +1,9 @@
 homeassistant:
+  auth_providers:
+    - type: homeassistant
+
+http:
+  server_port: 18123
 
 frontend:
 config:

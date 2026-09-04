@@ -3,14 +3,20 @@ services:
     build:
       context: .
       dockerfile: ha_test/Dockerfile.app
-    command:
-      - /bin/sh
-      - -c
-      - python /harness/seed.py && exec python -m wa_synergy.service --options /data/options.json
+    command: ["python", "-m", "wa_synergy.service"]
+    environment:
+      WA_SYNERGY_EMAIL: ${WA_SYNERGY_EMAIL:?WA_SYNERGY_EMAIL must be set}
+      WA_SYNERGY_PASSWORD: ${WA_SYNERGY_PASSWORD:?WA_SYNERGY_PASSWORD must be set}
+      WA_SYNERGY_GMAIL_APP_PASSWORD: ${WA_SYNERGY_GMAIL_APP_PASSWORD:?WA_SYNERGY_GMAIL_APP_PASSWORD must be set}
+      WA_SYNERGY_API_TOKEN: ha-live-test-token-0123456789abcdef0123456789
+      WA_SYNERGY_DB_PATH: /data/synergy.sqlite3
+      WA_SYNERGY_SYNC_HOURS: "24"
+      WA_SYNERGY_SYNC_RETRY_SECONDS: "5"
+      WA_SYNERGY_BACKFILL_DAYS: ${WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS:-14}
+      WA_SYNERGY_REFRESH_DAYS: ${WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS:-14}
+      WA_SYNERGY_SYNC_ON_START: "true"
     volumes:
       - synergy-app-data:/data
-      - ./ha_test/options.json:/data/options.json:ro
-      - ./ha_test/seed.py:/harness/seed.py:ro
     ports:
       - "18099:8099"
 
@@ -25,7 +31,7 @@ services:
       - ./ha_test/configuration.yaml:/config/configuration.yaml:ro
       - ./custom_components/wa_synergy:/config/custom_components/wa_synergy:ro
     ports:
-      - "18123:8123"
+      - "18123:18123"
 
 volumes:
   synergy-app-data:

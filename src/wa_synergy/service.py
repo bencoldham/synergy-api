@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import threading
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -42,16 +41,24 @@ class ServiceSettings:
     host: str = "0.0.0.0"
     port: int = 8099
     sync_hours: int = 6
+    sync_retry_seconds: int = 300
     backfill_days: int = 730
     refresh_days: int = 30
     sync_on_start: bool = True
 
     def __post_init__(self) -> None:
         if len(self.api_token) < 32:
-            raise ConfigurationError("service API token must contain at least 32 characters")
+            raise ConfigurationError(
+                "service API token must contain at least 32 characters"
+            )
         if not 1 <= self.port <= 65535:
             raise ConfigurationError("service port must be between 1 and 65535")
-        for name in ("sync_hours", "backfill_days", "refresh_days"):
+        for name in (
+            "sync_hours",
+            "sync_retry_seconds",
+            "backfill_days",
+            "refresh_days",
+        ):
             if getattr(self, name) < 1:
                 raise ConfigurationError(f"service {name} must be positive")
 
@@ -89,7 +96,9 @@ class SynergyService:
             self._syncing = True
         try:
             existing = get_usage_intervals(self.settings.db_path)
-            days = self.settings.refresh_days if existing else self.settings.backfill_days
+            days = (
+                self.settings.refresh_days if existing else self.settings.backfill_days
+            )
             end = datetime.now(_PERTH).date()
             current = end - timedelta(days=days)
             refresh_cutoff = end - timedelta(days=self.settings.refresh_days)
@@ -264,7 +273,9 @@ def _parse_since(values: list[str]) -> datetime | None:
     return value.astimezone(UTC)
 
 
-def _option(data: dict[str, Any], key: str, env_name: str, default: object = None) -> Any:
+def _option(
+    data: dict[str, Any], key: str, env_name: str, default: object = None
+) -> Any:
     if key in data:
         return data[key]
     return os.environ.get(env_name, default)
@@ -309,23 +320,32 @@ def _load_settings(options_path: Path | None) -> ServiceSettings:
         host=str(_option(data, "host", "WA_SYNERGY_HOST", "0.0.0.0")),
         port=int(_option(data, "port", "WA_SYNERGY_PORT", 8099)),
         sync_hours=int(_option(data, "sync_hours", "WA_SYNERGY_SYNC_HOURS", 6)),
+        sync_retry_seconds=int(
+            _option(
+                data,
+                "sync_retry_seconds",
+                "WA_SYNERGY_SYNC_RETRY_SECONDS",
+                300,
+            )
+        ),
         backfill_days=int(
             _option(data, "backfill_days", "WA_SYNERGY_BACKFILL_DAYS", 730)
         ),
-        refresh_days=int(
-            _option(data, "refresh_days", "WA_SYNERGY_REFRESH_DAYS", 30)
-        ),
+        refresh_days=int(_option(data, "refresh_days", "WA_SYNERGY_REFRESH_DAYS", 30)),
         sync_on_start=sync_on_start,
     )
 
 
 def _sync_loop(service: SynergyService, stop: threading.Event) -> None:
-    if service.settings.sync_on_start:
-        with suppress(SynergyError):
+    regular_delay = service.settings.sync_hours * 60 * 60
+    delay = 0 if service.settings.sync_on_start else regular_delay
+    while not stop.wait(delay):
+        try:
             service.sync()
-    while not stop.wait(service.settings.sync_hours * 60 * 60):
-        with suppress(SynergyError):
-            service.sync()
+        except SynergyError:
+            delay = service.settings.sync_retry_seconds
+        else:
+            delay = regular_delay
 
 
 def main() -> None:

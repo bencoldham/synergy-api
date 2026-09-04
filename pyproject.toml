@@ -27,6 +27,7 @@ classifiers = [
 dev = [
     "mypy>=1.13,<2",
     "python-dotenv>=1.2.3",
+    "websockets>=13,<17",
     "ruff>=0.8,<1",
 ]
 

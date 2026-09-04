@@ -64,6 +64,7 @@ _STEALTH = Stealth(
     navigator_platform_override="Linux x86_64",
 )
 
+
 @dataclass(frozen=True, slots=True)
 class _AuthenticationResult:
     """Minimum memory-only material required by the direct Aura transport."""
@@ -171,16 +172,30 @@ def _wait_for_state(
     allowed: frozenset[_AuthState],
     *,
     include_login: bool = False,
+    stable_login_as_retryable: bool = False,
     timeout_ms: int | None = None,
 ) -> _AuthState:
     effective_timeout_ms = _STATE_TIMEOUT_MS if timeout_ms is None else timeout_ms
     deadline = time.monotonic() + (effective_timeout_ms / 1_000)
+    login_visible_since: float | None = None
     while True:
-        state = _detect_state(page, include_login=include_login)
+        now = time.monotonic()
+        state = _detect_state(
+            page,
+            include_login=include_login or stable_login_as_retryable,
+        )
+        if stable_login_as_retryable and state is _AuthState.LOGIN:
+            if login_visible_since is None:
+                login_visible_since = now
+            elif (now - login_visible_since) * 1_000 >= _LOGIN_RETRY_STABILITY_MS:
+                return _AuthState.RETRYABLE_LOGIN
+            state = None
+        else:
+            login_visible_since = None
         if state in allowed:
             assert state is not None
             return state
-        remaining_ms = int((deadline - time.monotonic()) * 1_000)
+        remaining_ms = int((deadline - now) * 1_000)
         if remaining_ms <= 0:
             expected = ", ".join(sorted(state.name for state in allowed))
             raise AuthenticationContractError(
@@ -337,7 +352,6 @@ def _authentication_result(
     )
 
 
-
 def _browser_user_agent(playwright: Playwright) -> str:
     raw = subprocess.check_output(
         [playwright.chromium.executable_path, "--version"],
@@ -423,6 +437,7 @@ def _mint_with_playwright(
             post_login_state = _wait_for_state(
                 page,
                 post_login_states | {_AuthState.RETRYABLE_LOGIN},
+                stable_login_as_retryable=True,
             )
             if post_login_state is _AuthState.RETRYABLE_LOGIN:
                 page.reload(
@@ -523,10 +538,14 @@ def mint_http_credentials(
         raise AuthenticationError("Synergy authentication requires valid credentials")
     if not isinstance(headless, bool):
         raise AuthenticationError("Synergy headless parameter must be boolean")
-    with sync_playwright() as playwright:
-        result = _mint_with_playwright(
-            playwright,
-            credentials,
-            headless=headless,
-        )
-    return result
+    try:
+        with sync_playwright() as playwright:
+            return _mint_with_playwright(
+                playwright,
+                credentials,
+                headless=headless,
+            )
+    except PlaywrightError as exc:
+        raise AuthenticationError(
+            f"Synergy browser authentication failed: {exc}"
+        ) from exc

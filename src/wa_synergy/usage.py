@@ -191,6 +191,8 @@ def _looks_like_unknown_channel(field: str, value: object) -> bool:
 
 def _validate_devices(chart_data: dict[str, object]) -> None:
     devices = chart_data.get("Devices")
+    if devices is None and chart_data.get("Response") == []:
+        return
     if not isinstance(devices, list):
         raise UsageValidationError("ChartData Devices must be a list")
     if any(

@@ -78,28 +78,24 @@ adding a second framework and YAML configuration instead of a native config flow
 
 ## Home Assistant test stack
 
-`compose.ha-test.yaml` runs the integration against Home Assistant 2026.9 and a
-separate app container built from the current checkout. It does not contact
-Synergy: `ha_test/seed.py` writes deterministic interval data and the app starts
-with synchronization disabled.
+`live_test.py` requires Docker Compose or Podman Compose. It builds the current
+companion app, synchronizes it against the real Synergy account configured in
+`.env`, starts Home Assistant 2026.9 in a container, completes onboarding,
+configures the integration, and verifies its sensors and Recorder statistics
+through Home Assistant's APIs.
+
+Install the development dependencies, then run the complete live test:
 
 ```console
-docker compose -f compose.ha-test.yaml up --build
+python -m pip install -e '.[dev]'
+python live_test.py
 ```
 
-Open `http://localhost:18123`, complete Home Assistant onboarding, and add the
-**WA Synergy** integration with:
-
-```text
-Service URL: http://synergy-app:8099
-API token:   ha-test-token-0123456789abcdef0123456789
-```
-
-The expected external statistic is
-`wa_synergy:001ha000000000test_grid_import`. Reset both persistent test volumes
-with:
-
-```console
-docker compose -f compose.ha-test.yaml down --volumes
-```
+The test starts `compose.ha-test.yaml` with fresh app and Home Assistant volumes.
+After the initial verification, it disconnects and restarts the real companion
+container, verifies that the resulting authentication failure is logged without
+killing the sync thread, restores the network, and performs another live Synergy
+sync. Failures print timestamped container logs. The test then removes the
+containers and volumes. Set `WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS` to override the
+default 14-day live-data window.
 
