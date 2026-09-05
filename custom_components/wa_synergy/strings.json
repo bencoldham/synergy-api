@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Connect to WA Synergy",
-        "description": "Enter the URL and API token configured in the WA Synergy companion app. Optionally select your plan to show GST-inclusive published rates effective 1 July 2026. This only configures Home Assistant; it does not change your Synergy contract. K1 is usage-tiered and has no single hourly price. Current rates must not be used to cost delayed historical usage.",
+        "description": "Enter the URL and API token configured in the WA Synergy companion app. Optionally select your plan to show GST-inclusive published rates effective 1 July 2026 and backfill historical usage cost. This only configures Home Assistant; it does not change your Synergy contract. K1 is usage-tiered and has no single hourly price.",
         "data": {
           "url": "Service URL",
           "api_token": "API token",
@@ -34,7 +34,7 @@
     "step": {
       "init": {
         "title": "Electricity tariff",
-        "description": "Select the plan on your Synergy contract, or leave pricing unconfigured. This only changes Home Assistant, not your Synergy contract. Rates include GST and are effective 1 July 2026, with hourly periods in Perth time. K1 has daily usage tiers: the current hourly price remains unknown and separate sensors show each tier. Current rates must not be used to cost delayed historical usage.",
+        "description": "Select the plan on your Synergy contract, or leave pricing unconfigured. This only changes Home Assistant, not your Synergy contract. Rates include GST and are effective 1 July 2026, with hourly periods in Perth time. Selecting a plan backfills historical usage cost. K1 has daily usage tiers: the current hourly price remains unknown and separate sensors show each tier.",
         "data": {
           "plan": "Electricity plan"
         }
@@ -74,6 +74,9 @@
       },
       "grid_import": {
         "name": "Grid import {service_point_id}"
+      },
+      "grid_import_cost": {
+        "name": "Grid import cost {service_point_id}"
       },
       "latest_day": {
         "name": "Latest day usage {service_point_id}"

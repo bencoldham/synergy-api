@@ -4,10 +4,10 @@ A unit is one kWh. K1 is consumption-tiered, so time alone cannot price it.
 These rates describe the published plans, not a customer's billing history.
 """
 
-from __future__ import annotations
-
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 CONF_PLAN = "plan"
@@ -142,3 +142,27 @@ def hourly_prices(plan_id: str) -> list[dict[str, int | float | str | None]]:
             }
         )
     return schedule
+
+
+def calculate_historical_cost(
+    plan_id: str,
+    points: Iterable[tuple[datetime, Decimal]],
+) -> Decimal | None:
+    """Backfill cumulative usage cost using the selected plan's tariff rates.
+
+    `points` must yield `(start, sum_kwh)` in chronological order.
+    Returns None if the plan is unconfigured or has no hourly price (e.g. K1).
+    """
+    if plan_id not in PLANS:
+        return None
+    total_cost = Decimal(0)
+    previous_sum = Decimal(0)
+    for start, cumulative in points:
+        price = price_at(plan_id, start)
+        if price is None:
+            return None
+        delta_kwh = cumulative - previous_sum
+        if delta_kwh > 0:
+            total_cost += delta_kwh * Decimal(str(price))
+        previous_sum = cumulative
+    return total_cost

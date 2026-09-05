@@ -74,8 +74,9 @@ The Home Assistant deployment has two parts:
    URL is `http://<home-assistant-host>:8099`. Select your electricity plan to
    enable tariff sensors, or leave it **Not configured**.
 
-The integration exposes a cumulative `Grid import <service point>` energy sensor
-and imports timestamped hourly grid-import statistics into Recorder. To use the
+The integration exposes cumulative `Grid import <service point>` energy and
+`Grid import cost <service point>` monetary sensors, and imports timestamped hourly
+grid-import statistics into Recorder. To use the
 historical data in the Energy dashboard, add a **Grid consumption** source and
 select `Synergy <service point> grid import`. On first setup the integration
 imports the complete app history; subsequent updates rewrite a rolling correction
@@ -90,6 +91,7 @@ Each service point exposes these energy sensors:
 | Sensor | Meaning |
 | --- | --- |
 | Grid import | Cumulative kWh across the app's stored complete hourly readings, not a lifetime meter reading. |
+| Grid import cost | Cumulative AUD cost backfilled across the stored hourly readings using the rates from the configured plan. |
 | Latest day usage | Import kWh for the latest complete reported Perth calendar day. |
 | Last 7 days usage | Import kWh for seven consecutive complete days ending on that reported day. |
 | Month to date usage | Import kWh from the first of the current Perth month through that reported day. |
@@ -121,7 +123,7 @@ full-history usage summaries.
 
 ### Electricity plans and prices
 
-Integration version **0.1.10** adds plan selection and local tariff sensors.
+Integration version **0.1.11** adds plan selection and local tariff sensors.
 Open **Settings > Devices & services > WA Synergy > Configure** to select or
 change the plan. This configures Home Assistant only; it does not change your
 contract with Synergy. The selection applies to this integration entry. Existing
@@ -163,11 +165,10 @@ Use the hourly schedule and current price for automations or alongside a live
 import meter. These are bundled published rates, not automatically scraped rates;
 future price changes require an integration update. They do not reconstruct
 historical tariffs, billing-plan changes, usage-tier allocations, or bills.
-In particular, **do not apply today's price sensor to this integration's delayed
-hourly import statistics to calculate historical Energy dashboard costs**.
-This release leaves those historical consumption statistics unchanged and does
-not generate cost statistics. Daily supply charges are not included in kWh prices.
-
+When a plan is selected, the integration backfills historical usage cost for the
+`Grid import cost <service point>` sensor assuming the selected plan's tariff rates
+apply across the stored history. For tiered plans like K1 or when left Unconfigured,
+the cost sensor remains `unknown`. Daily supply charges are not included in kWh prices.
 AppDaemon is not used. It would still require a custom Chromium-capable image and
 would need privileged WebSocket access to Recorder's statistics import API, while
 adding a second framework and YAML configuration instead of a native config flow.

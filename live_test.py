@@ -199,7 +199,7 @@ def _exercise_live_network_failure() -> None:
     expected_labels = {
         "io.hass.arch": "amd64",
         "io.hass.type": "app",
-        "io.hass.version": "0.1.10",
+        "io.hass.version": "0.1.11",
     }
     if any(labels.get(key) != value for key, value in expected_labels.items()):
         raise RuntimeError(
@@ -350,6 +350,7 @@ def _status_sensors(token: str) -> list[dict[str, Any]] | None:
         is_period = sensor["unique_id"].endswith(
             ("_latest_day", "_last_7_days", "_month_to_date")
         )
+        is_cost = sensor["unique_id"].endswith("_grid_import_cost")
         is_tariff = sensor["unique_id"].endswith(
             tuple(f"_{key}" for key in _TARIFF_SENSOR_KEYS)
         )
@@ -357,8 +358,17 @@ def _status_sensors(token: str) -> list[dict[str, Any]] | None:
             sensor["state"] == "unknown"
             and attributes.get("device_class") != "energy"
             and not is_tariff
+            and not is_cost
         ):
             return None
+        if is_cost:
+            if attributes.get("device_class") != "monetary":
+                raise RuntimeError(f"invalid cost device class: {sensor}")
+            if attributes.get("unit_of_measurement") != "AUD":
+                raise RuntimeError(f"invalid cost unit: {sensor}")
+            if attributes.get("state_class") != "total":
+                raise RuntimeError(f"invalid cost state class: {sensor}")
+
         if attributes.get("device_class") == "energy":
             if attributes.get("unit_of_measurement") != "kWh":
                 raise RuntimeError(f"invalid energy unit: {sensor}")
@@ -627,9 +637,21 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
                 daily[day] = sum((hours[hour]
                                  for hour in required), Decimal(0))
 
+        total_cost = Decimal(0)
+        previous_cost_sum = Decimal(0)
+        for point in sorted(service_points, key=lambda item: item["start"]):
+            start_dt = datetime.fromisoformat(point["start"]).astimezone(perth)
+            cum = Decimal(point["sum_kwh"])
+            price = Decimal(_EXPECTED_TARIFFS["home_a1"]["prices"][start_dt.hour])
+            delta = cum - previous_cost_sum
+            if delta > 0:
+                total_cost += delta * price
+            previous_cost_sum = cum
+
         summary: dict[str, Any] = {
             "service_point_id": service_id,
             "total_import_kwh": previous,
+            "total_import_cost": round(total_cost, 2),
             "latest_day": None,
             "last_7_days": None,
             "month_to_date": None,
@@ -719,6 +741,18 @@ def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str
         total = sensor_for(f"{service_key}_grid_import")
         check_energy(total, summary["total_import_kwh"] if summary else None)
         assert total["attributes"]["state_class"] == "total", total
+        cost = sensor_for(f"{service_key}_grid_import_cost")
+        assert cost["attributes"]["device_class"] == "monetary", cost
+        assert cost["attributes"]["unit_of_measurement"] == "AUD", cost
+        assert cost["attributes"]["state_class"] == "total", cost
+        expected_cost = summary["total_import_cost"] if summary else None
+        if expected_cost is None:
+            assert cost["state"] == "unknown", cost
+        else:
+            assert abs(Decimal(cost["state"]) - expected_cost) < Decimal("0.01"), (
+                cost,
+                expected_cost,
+            )
         for key in ("latest_day", "last_7_days", "month_to_date"):
             sensor = sensor_for(f"{service_key}_{key}")
             period = summary[key] if summary else None

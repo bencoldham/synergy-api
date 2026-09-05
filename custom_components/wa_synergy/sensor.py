@@ -30,6 +30,7 @@ from .tariffs import (
     EFFECTIVE_FROM,
     PLANS,
     TIME_ZONE,
+    calculate_historical_cost,
     hourly_prices,
     period_at,
     price_at,
@@ -192,6 +193,48 @@ class SynergyGridImportSensor(_SynergySensor):
         return summary.total_import_kwh if summary is not None else None
 
 
+
+class SynergyGridImportCostSensor(_SynergySensor):
+    """Cumulative backfilled cost of grid import based on the selected plan."""
+
+    def __init__(
+        self,
+        coordinator: SynergyCoordinator,
+        entry: ConfigEntry[SynergyRuntimeData],
+        service_point_id: str,
+        plan_id: str,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            entry,
+            SensorEntityDescription(
+                key="grid_import_cost",
+                device_class=SensorDeviceClass.MONETARY,
+                native_unit_of_measurement="AUD",
+                state_class=SensorStateClass.TOTAL,
+                suggested_display_precision=2,
+            ),
+            service_point_id,
+        )
+        self._service_point_id = service_point_id
+        self._plan_id = plan_id
+
+    @property
+    def native_value(self) -> Decimal | None:
+        points = (
+            (point.start, point.sum_kwh)
+            for point in sorted(
+                (
+                    p
+                    for p in self.coordinator.data.statistics
+                    if p.service_point_id == self._service_point_id
+                ),
+                key=lambda p: p.start,
+            )
+        )
+        cost = calculate_historical_cost(self._plan_id, points)
+        return round(cost, 2) if cost is not None else None
+
 class SynergyPeriodSensor(_SynergySensor):
     """A dated consumption snapshot, not an accumulating meter."""
 
@@ -348,6 +391,11 @@ async def async_setup_entry(
     )
     for service_point_id in coordinator.data.status.service_points:
         entities.append(SynergyGridImportSensor(coordinator, entry, service_point_id))
+        entities.append(
+            SynergyGridImportCostSensor(
+                coordinator, entry, service_point_id, plan_id
+            )
+        )
         entities.extend(
             SynergyPeriodSensor(coordinator, entry, service_point_id, key, period)
             for key, period in _PERIOD_SENSORS
