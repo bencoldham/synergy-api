@@ -147,7 +147,7 @@ def _exercise_live_network_failure() -> None:
     expected_labels = {
         "io.hass.arch": "amd64",
         "io.hass.type": "app",
-        "io.hass.version": "0.1.6",
+        "io.hass.version": "0.1.7",
     }
     if any(labels.get(key) != value for key, value in expected_labels.items()):
         raise RuntimeError(
@@ -282,8 +282,17 @@ def _status_sensors(token: str) -> list[dict[str, Any]] | None:
     sensors = [
         state for state in states if state["entity_id"].startswith("sensor.wa_synergy_")
     ]
-    if len(sensors) >= 2 and all(
-        state["state"] not in {"unknown", "unavailable"} for state in sensors
+    energy_sensors = [
+        state
+        for state in sensors
+        if state["attributes"].get("device_class") == "energy"
+        and state["attributes"].get("state_class") == "total_increasing"
+        and state["attributes"].get("unit_of_measurement") == "kWh"
+    ]
+    if (
+        len(sensors) >= 3
+        and energy_sensors
+        and all(state["state"] not in {"unknown", "unavailable"} for state in sensors)
     ):
         return sensors
     return None
@@ -342,6 +351,44 @@ def _imported_statistics(token: str) -> dict[str, list[dict[str, Any]]] | None:
     return None
 
 
+def _configure_energy_dashboard(
+    token: str,
+    statistic_ids: list[str],
+) -> dict[str, Any]:
+    energy_sources = [
+        {
+            "type": "grid",
+            "stat_energy_from": statistic_id,
+            "stat_energy_to": None,
+            "stat_cost": None,
+            "entity_energy_price": None,
+            "number_energy_price": None,
+            "stat_compensation": None,
+            "entity_energy_price_export": None,
+            "number_energy_price_export": None,
+            "cost_adjustment_day": 0,
+            "name": "WA Synergy",
+        }
+        for statistic_id in sorted(statistic_ids)
+    ]
+    preferences = _ha_websocket(
+        token,
+        {
+            "type": "energy/save_prefs",
+            "energy_sources": energy_sources,
+            "device_consumption": [],
+            "device_consumption_water": [],
+        },
+    )
+    validation = _ha_websocket(token, {"type": "energy/validate"})
+    issues = [
+        issue for groups in validation.values() for group in groups for issue in group
+    ]
+    if issues:
+        raise RuntimeError(f"Energy dashboard rejected WA Synergy: {issues}")
+    return preferences
+
+
 def _run_ha_verification(service_url: str = _APP_URL) -> None:
     print("Waiting for live Synergy synchronization...")
     status = _wait_for("live Synergy synchronization", _app_status, timeout=900)
@@ -372,6 +419,8 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         lambda: _imported_statistics(token),
         timeout=120,
     )
+    print("Configuring the Home Assistant Energy dashboard...")
+    energy_preferences = _configure_energy_dashboard(token, list(statistics))
 
     print(
         "Live Synergy sync:",
@@ -379,6 +428,13 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         f"data through {status['data_through']}",
     )
     print("Home Assistant config entry:", entry["title"])
+    print(
+        "Home Assistant Energy dashboard:",
+        ", ".join(
+            source["stat_energy_from"]
+            for source in energy_preferences["energy_sources"]
+        ),
+    )
     print(
         "Home Assistant sensors:",
         ", ".join(f"{item['entity_id']}={item['state']}" for item in sensors),

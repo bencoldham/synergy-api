@@ -34,6 +34,9 @@
       "data_through": {
         "name": "Data available through"
       },
+      "grid_import": {
+        "name": "Grid import {service_point_id}"
+      },
       "last_success": {
         "name": "Last successful sync"
       }

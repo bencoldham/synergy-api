@@ -66,11 +66,14 @@ The Home Assistant deployment has two parts:
    Enter the app URL and the same API token. With the default published port, the
    URL is `http://<home-assistant-host>:8099`.
 
-The integration imports timestamped hourly grid-import statistics into Recorder
-for the Energy dashboard. On first setup it imports the complete app history;
-subsequent updates rewrite a rolling correction window. `VAL_SOLAR` is retained
-in the source database but is not exposed as generation or export because the
-provider response does not establish that meaning.
+The integration exposes a cumulative `Grid import <service point>` energy sensor
+and imports timestamped hourly grid-import statistics into Recorder. To use the
+historical data in the Energy dashboard, add a **Grid consumption** source and
+select `Synergy <service point> grid import`. On first setup the integration
+imports the complete app history; subsequent updates rewrite a rolling correction
+window. `VAL_SOLAR` is retained in the source database but is not exposed as
+generation or export because the provider response does not establish that
+meaning.
 
 AppDaemon is not used. It would still require a custom Chromium-capable image and
 would need privileged WebSocket access to Recorder's statistics import API, while
