@@ -4,7 +4,7 @@ A unit is one kWh. K1 is consumption-tiered, so time alone cannot price it.
 These rates describe the published plans, not a customer's billing history.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -155,14 +155,28 @@ def calculate_historical_cost(
     """
     if plan_id not in PLANS:
         return None
+    if not PLANS[plan_id].periods:
+        return None
+    total_cost = Decimal(0)
+    for _, cost in historical_cost_points(plan_id, points):
+        total_cost = cost
+    return total_cost
+
+
+def historical_cost_points(
+    plan_id: str,
+    points: Iterable[tuple[datetime, Decimal]],
+) -> Iterator[tuple[datetime, Decimal]]:
+    """Yield hourly cumulative AUD costs from chronological full-history usage."""
+    if plan_id not in PLANS or not PLANS[plan_id].periods:
+        return
     total_cost = Decimal(0)
     previous_sum = Decimal(0)
     for start, cumulative in points:
         price = price_at(plan_id, start)
-        if price is None:
-            return None
+        assert price is not None
         delta_kwh = cumulative - previous_sum
         if delta_kwh > 0:
             total_cost += delta_kwh * Decimal(str(price))
         previous_sum = cumulative
-    return total_cost
+        yield start, total_cost

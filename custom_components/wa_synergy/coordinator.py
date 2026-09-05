@@ -24,6 +24,7 @@ from .api import (
     SynergyServiceClient,
 )
 from .const import CORRECTION_WINDOW, DOMAIN, UPDATE_INTERVAL
+from .tariffs import CONF_PLAN, DEFAULT_PLAN, PLANS, historical_cost_points
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,10 +48,15 @@ class SynergyCoordinator(DataUpdateCoordinator[StatisticsSnapshot]):
         )
         self._client = client
         self._initial_import = True
+        self._plan_id = config_entry.options.get(
+            CONF_PLAN, config_entry.data.get(CONF_PLAN, DEFAULT_PLAN)
+        )
 
     async def _async_update_data(self) -> StatisticsSnapshot:
         since = None
-        if not self._initial_import:
+        plan = PLANS.get(self._plan_id)
+        # Cost sums need the full prefix, including after provider corrections.
+        if not self._initial_import and not (plan and plan.periods):
             since = datetime.now(UTC) - CORRECTION_WINDOW
         try:
             snapshot = await self._client.async_get_statistics(since)
@@ -65,9 +71,11 @@ class SynergyCoordinator(DataUpdateCoordinator[StatisticsSnapshot]):
             raise UpdateFailed("WA Synergy service has not completed its first sync")
 
         try:
-            _import_statistics(self.hass, snapshot.statistics)
+            _import_statistics(self.hass, snapshot.statistics, self._plan_id)
         except HomeAssistantError as exc:
-            raise UpdateFailed(f"could not import WA Synergy statistics: {exc}") from exc
+            raise UpdateFailed(
+                f"could not import WA Synergy statistics: {exc}"
+            ) from exc
         self._initial_import = False
         return snapshot
 
@@ -75,6 +83,7 @@ class SynergyCoordinator(DataUpdateCoordinator[StatisticsSnapshot]):
 def _import_statistics(
     hass: HomeAssistant,
     points: tuple[StatisticPoint, ...],
+    plan_id: str,
 ) -> None:
     grouped: dict[str, list[StatisticPoint]] = defaultdict(list)
     for point in points:
@@ -82,12 +91,13 @@ def _import_statistics(
 
     for service_point_id, service_points in grouped.items():
         statistic_id = f"{DOMAIN}:{service_point_id.casefold()}_grid_import"
+        service_points.sort(key=lambda point: point.start)
         statistics: list[StatisticData] = [
             {
                 "start": point.start,
                 "sum": float(point.sum_kwh),
             }
-            for point in sorted(service_points, key=lambda value: value.start)
+            for point in service_points
         ]
         async_add_external_statistics(
             hass,
@@ -102,3 +112,24 @@ def _import_statistics(
             },
             statistics,
         )
+        costs: list[StatisticData] = [
+            {"start": start, "sum": float(total)}
+            for start, total in historical_cost_points(
+                plan_id,
+                ((point.start, point.sum_kwh) for point in service_points),
+            )
+        ]
+        if costs:
+            async_add_external_statistics(
+                hass,
+                {
+                    "source": DOMAIN,
+                    "statistic_id": f"{statistic_id}_cost",
+                    "name": f"Synergy {service_point_id} grid import cost",
+                    "unit_of_measurement": "AUD",
+                    "unit_class": None,
+                    "has_sum": True,
+                    "mean_type": StatisticMeanType.NONE,
+                },
+                costs,
+            )

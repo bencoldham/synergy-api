@@ -76,13 +76,16 @@ The Home Assistant deployment has two parts:
 
 The integration exposes cumulative `Grid import <service point>` energy and
 `Grid import cost <service point>` monetary sensors, and imports timestamped hourly
-grid-import statistics into Recorder. To use the
+grid-import and cost statistics into Recorder. To use the
 historical data in the Energy dashboard, add a **Grid consumption** source and
-select `Synergy <service point> grid import`. On first setup the integration
-imports the complete app history; subsequent updates rewrite a rolling correction
+select `Synergy <service point> grid import`. With a supported tariff selected,
+choose `Synergy <service point> grid import cost` for the source's recorded cost.
+Integration version **0.1.12** adds this cumulative hourly AUD statistic.
+On first setup the integration imports the complete app history. With cost enabled,
+each refresh recalculates the complete history so corrections and plan changes
+also update subsequent cost sums; otherwise updates rewrite a rolling correction
 window. `VAL_SOLAR` is retained in the source database but is not exposed as
-generation or export because the provider response does not establish that
-meaning.
+generation or export because the provider response does not establish that meaning.
 
 ### Sensors
 
@@ -166,9 +169,11 @@ import meter. These are bundled published rates, not automatically scraped rates
 future price changes require an integration update. They do not reconstruct
 historical tariffs, billing-plan changes, usage-tier allocations, or bills.
 When a plan is selected, the integration backfills historical usage cost for the
-`Grid import cost <service point>` sensor assuming the selected plan's tariff rates
-apply across the stored history. For tiered plans like K1 or when left Unconfigured,
-the cost sensor remains `unknown`. Daily supply charges are not included in kWh prices.
+`Grid import cost <service point>` sensor and hourly Recorder cost statistic,
+assuming the selected plan's tariff rates apply across the stored history.
+For tiered plans like K1 or when left Unconfigured, the cost sensor remains
+`unknown` and no cost statistics are imported. Previously imported cost history
+remains in Recorder. Daily supply charges are not included.
 AppDaemon is not used. It would still require a custom Chromium-capable image and
 would need privileged WebSocket access to Recorder's statistics import API, while
 adding a second framework and YAML configuration instead of a native config flow.

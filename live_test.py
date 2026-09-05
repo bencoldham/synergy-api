@@ -19,8 +19,7 @@ from dotenv import load_dotenv
 from websockets.sync.client import connect
 
 _COMPOSE_BIN = (
-    "docker" if shutil.which(
-        "docker") else "podman" if shutil.which("podman") else None
+    "docker" if shutil.which("docker") else "podman" if shutil.which("podman") else None
 )
 _COMPOSE = (
     ("docker", "compose", "-f", "compose.ha-test.yaml")
@@ -54,8 +53,7 @@ _EXPECTED_TARIFFS = {
     "midday_saver": {
         "supply": "1.327806",
         "prices": (
-            ["0.243431"] * 9 + ["0.088520"] * 6 +
-            ["0.553253"] * 6 + ["0.243431"] * 3
+            ["0.243431"] * 9 + ["0.088520"] * 6 + ["0.553253"] * 6 + ["0.243431"] * 3
         ),
         "pricing_type": "time_of_use",
     },
@@ -192,8 +190,7 @@ def _exercise_live_network_failure() -> None:
         "{{.ID}}",
     )
     if not container_id:
-        raise RuntimeError(
-            "cannot identify the running companion service container")
+        raise RuntimeError("cannot identify the running companion service container")
     inspected = json.loads(_runtime("inspect", container_id))
     labels = inspected[0]["Config"]["Labels"]
     expected_labels = {
@@ -222,8 +219,7 @@ def _exercise_live_network_failure() -> None:
             timeout=90,
         )
         if _SYNC_THREAD_CRASH in failure_logs:
-            raise RuntimeError(
-                "synergy-sync thread crashed during network outage")
+            raise RuntimeError("synergy-sync thread crashed during network outage")
         if "| ERROR    | Traceback (most recent call last):" not in failure_logs:
             raise RuntimeError(
                 "companion traceback lines have no application timestamp"
@@ -426,15 +422,13 @@ def _verify_tariff(token: str, entry_id: str, plan: str) -> dict[str, dict[str, 
     expected = _EXPECTED_TARIFFS[plan]
 
     def ready() -> tuple[dict[str, dict[str, Any]], int] | None:
-        entries = _ha_request(
-            "GET", "/api/config/config_entries/entry", token=token)
+        entries = _ha_request("GET", "/api/config/config_entries/entry", token=token)
         if not any(
             item["entry_id"] == entry_id and item["state"] == "loaded"
             for item in entries
         ):
             return None
-        registry = _ha_websocket(
-            token, {"type": "config/entity_registry/list"})
+        registry = _ha_websocket(token, {"type": "config/entity_registry/list"})
         entity_keys = {
             entity["entity_id"]: key
             for entity in registry
@@ -461,8 +455,7 @@ def _verify_tariff(token: str, entry_id: str, plan: str) -> dict[str, dict[str, 
             return None
         return sensors, after.hour
 
-    sensors, hour = _wait_for(
-        f"loaded {plan} tariff entities", ready, timeout=120)
+    sensors, hour = _wait_for(f"loaded {plan} tariff entities", ready, timeout=120)
 
     def check_price(key: str, wanted: str | None, unit: str = "AUD/kWh") -> None:
         sensor = sensors[key]
@@ -512,8 +505,7 @@ def _verify_tariff(token: str, entry_id: str, plan: str) -> dict[str, dict[str, 
             assert row["price"] is None and row["period"] is None, (plan, row)
         else:
             assert isinstance(row["price"], (int, float)), (plan, row)
-            assert Decimal(str(row["price"])) == Decimal(
-                price), (plan, row, price)
+            assert Decimal(str(row["price"])) == Decimal(price), (plan, row, price)
             assert row["period"] == periods_by_price[price], (plan, row, price)
     assert attributes["period"] == schedule[hour]["period"], attributes
     print(
@@ -544,6 +536,15 @@ def _exercise_tariffs(token: str, entry_id: str) -> None:
     ):
         _select_tariff(token, entry_id, plan)
         _verify_tariff(token, entry_id, plan)
+        if plan in ("midday_saver", "electric_vehicle", "home_a1"):
+            snapshot = _app_statistics()
+            _wait_for(
+                f"{plan} hourly Recorder energy and cost sums",
+                lambda snapshot=snapshot, plan=plan: _imported_statistics(
+                    token, snapshot["statistics"], plan
+                ),
+                timeout=120,
+            )
         result = _ha_request(
             "POST",
             f"/api/config/config_entries/entry/{entry_id}/reload",
@@ -551,8 +552,7 @@ def _exercise_tariffs(token: str, entry_id: str) -> None:
         )
         assert result["require_restart"] is False, result
         _verify_tariff(token, entry_id, plan)
-        print(
-            f"Tariff option {plan} persisted an explicit config-entry reload")
+        print(f"Tariff option {plan} persisted an explicit config-entry reload")
         if plan == "electric_vehicle":
             _ha_websocket(
                 token,
@@ -606,8 +606,7 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
         grouped[point["service_point_id"]].append(point)
 
     def period(daily: dict[date, Decimal], start: date, end: date) -> dict[str, Any]:
-        days = [start + timedelta(days=i)
-                for i in range((end - start).days + 1)]
+        days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
         return {
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
@@ -634,8 +633,7 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
             midnight = datetime.combine(day, datetime.min.time(), tzinfo=perth)
             required = [midnight + timedelta(hours=hour) for hour in range(24)]
             if all(hour in hours for hour in required):
-                daily[day] = sum((hours[hour]
-                                 for hour in required), Decimal(0))
+                daily[day] = sum((hours[hour] for hour in required), Decimal(0))
 
         total_cost = Decimal(0)
         previous_cost_sum = Decimal(0)
@@ -659,8 +657,7 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
         if daily:
             latest = max(daily)
             summary["latest_day"] = period(daily, latest, latest)
-            summary["last_7_days"] = period(
-                daily, latest - timedelta(days=6), latest)
+            summary["last_7_days"] = period(daily, latest - timedelta(days=6), latest)
             month_start = today.replace(day=1)
             if latest >= month_start:
                 summary["month_to_date"] = period(daily, month_start, latest)
@@ -671,15 +668,13 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
 def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     expected = _expected_summaries(snapshot["statistics"])
     assert expected, "live account returned no complete hourly import data"
-    actual = {summary["service_point_id"]              : summary for summary in snapshot["summaries"]}
-    assert len(actual) == len(
-        snapshot["summaries"]), "duplicate service summaries"
+    actual = {summary["service_point_id"]: summary for summary in snapshot["summaries"]}
+    assert len(actual) == len(snapshot["summaries"]), "duplicate service summaries"
     assert actual.keys() == expected.keys(), (actual.keys(), expected.keys())
     for service_id, summary in expected.items():
         received = actual[service_id]
         assert isinstance(received["total_import_kwh"], str), received
-        assert Decimal(received["total_import_kwh"]
-                       ) == summary["total_import_kwh"]
+        assert Decimal(received["total_import_kwh"]) == summary["total_import_kwh"]
         for key in ("latest_day", "last_7_days", "month_to_date"):
             wanted = summary[key]
             if wanted is None:
@@ -701,8 +696,7 @@ def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str
     ):
         filtered = _app_statistics(since)
         if since == future:
-            assert filtered["statistics"] == [
-            ], "future since returned hourly data"
+            assert filtered["statistics"] == [], "future since returned hourly data"
         assert filtered["summaries"] == snapshot["summaries"], (
             "summaries changed when filtering hourly statistics",
             since,
@@ -784,15 +778,14 @@ def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str
     sync = sensor_for("sync_status")
     assert sync["state"] == "idle", sync
     assert sync["attributes"]["device_class"] == "enum", sync
-    assert set(sync["attributes"]["options"]) == {
-        "waiting", "syncing", "idle", "error"}
+    assert set(sync["attributes"]["options"]) == {"waiting", "syncing", "idle", "error"}
     assert "last_error" in sync["attributes"], sync
     assert sync["attributes"]["last_error"] == status["last_error"], sync
     return sensors
 
 
 def _imported_statistics(
-    token: str, points: list[dict[str, Any]]
+    token: str, points: list[dict[str, Any]], plan: str = "home_a1"
 ) -> dict[str, list[dict[str, Any]]] | None:
     metadata = _ha_websocket(
         token,
@@ -809,6 +802,27 @@ def _imported_statistics(
         expected[statistic_id][datetime.fromisoformat(point["start"]).timestamp()] = (
             Decimal(point["sum_kwh"])
         )
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for point in points:
+        grouped[point["service_point_id"]].append(point)
+    for service_id, service_points in grouped.items():
+        cost = Decimal(0)
+        previous = Decimal(0)
+        statistic_id = f"wa_synergy:{service_id.casefold()}_grid_import_cost"
+        for point in sorted(service_points, key=lambda item: item["start"]):
+            start = datetime.fromisoformat(point["start"])
+            cumulative = Decimal(point["sum_kwh"])
+            price = Decimal(
+                _EXPECTED_TARIFFS[plan]["prices"][
+                    start.astimezone(ZoneInfo("Australia/Perth")).hour
+                ]
+            )
+            cost += max(cumulative - previous, Decimal(0)) * price
+            previous = cumulative
+            expected[statistic_id][start.timestamp()] = cost
+    for item in metadata:
+        if item["statistic_id"] in expected and item["statistic_id"].endswith("_cost"):
+            assert item["statistics_unit_of_measurement"] == "AUD", item
     if not statistic_ids:
         return None
     if set(statistic_ids) != expected.keys():
@@ -837,8 +851,7 @@ def _imported_statistics(
             actual[timestamp] = row["sum"]
         if actual.keys() != hourly.keys():
             return None
-        assert len(actual) == len(
-            rows), f"duplicate Recorder hours: {statistic_id}"
+        assert len(actual) == len(rows), f"duplicate Recorder hours: {statistic_id}"
         for timestamp, total in hourly.items():
             assert actual[timestamp] is not None, (statistic_id, timestamp)
             assert abs(Decimal(str(actual[timestamp])) - total) < Decimal("0.000001"), (
@@ -859,7 +872,7 @@ def _configure_energy_dashboard(
             "type": "grid",
             "stat_energy_from": statistic_id,
             "stat_energy_to": None,
-            "stat_cost": None,
+            "stat_cost": f"{statistic_id}_cost",
             "entity_energy_price": None,
             "number_energy_price": None,
             "stat_compensation": None,
@@ -869,6 +882,7 @@ def _configure_energy_dashboard(
             "name": "WA Synergy",
         }
         for statistic_id in sorted(statistic_ids)
+        if statistic_id.endswith("_grid_import")
     ]
     preferences = _ha_websocket(
         token,
@@ -890,8 +904,7 @@ def _configure_energy_dashboard(
 
 def _run_ha_verification(service_url: str = _APP_URL) -> None:
     print("Waiting for live Synergy synchronization...")
-    status = _wait_for("live Synergy synchronization",
-                       _app_status, timeout=900)
+    status = _wait_for("live Synergy synchronization", _app_status, timeout=900)
     print(
         f"Live sync complete: {len(status['service_points'])} service point(s), "
         f"data through {status['data_through']}"
@@ -980,8 +993,7 @@ def main() -> None:
     )
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
-        raise RuntimeError(
-            f"missing live Synergy credentials: {', '.join(missing)}")
+        raise RuntimeError(f"missing live Synergy credentials: {', '.join(missing)}")
 
     if not _can_compose():
         raise RuntimeError(
