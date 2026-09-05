@@ -47,6 +47,13 @@ print(result)
 
 The client opens Playwright only for login and OTP, captures the `sid`, Aura token, Aura context, and service identifier, closes the browser, calls the Aura API directly, then stores normalized intervals in SQLite.
 
+Salesforce can return HTTP 200 with a rejected session inside the Aura response.
+The client matches the requested action by ID, independently of additional portal
+warnings, and reauthenticates once after an Apex-class access denial. If the new
+session is also rejected, synchronization fails with Salesforce's error message.
+Check `last_success`, `last_error`, and `data_through` at `/v1/status` to distinguish
+a completed sync from an HTTP request that merely returned 200.
+
 Run the real flow with:
 
 ```console
@@ -85,7 +92,8 @@ adding a second framework and YAML configuration instead of a native config flow
 companion app, synchronizes it against the real Synergy account configured in
 `.env`, starts Home Assistant 2026.9 in a container, completes onboarding,
 configures the integration, and verifies its sensors and Recorder statistics
-through Home Assistant's APIs.
+through Home Assistant's APIs, including a subsequent incremental statistics
+refresh with a timezone-aware `since` parameter.
 
 Install the development dependencies, then run the complete live test:
 

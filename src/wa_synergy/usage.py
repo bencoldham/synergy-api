@@ -29,6 +29,7 @@ _PORTAL_ORIGIN = "https://my.synergy.net.au"
 _AURA_PATH = "/s/sfsites/aura"
 _AURA_EXECUTE_QUERY = {"r": "51", "aura.ApexAction.execute": "1"}
 _FORM_CONTENT_TYPE = "application/x-www-form-urlencoded;charset=UTF-8"
+_ACTION_ID = "1;a"
 _ACTION_DESCRIPTOR = "aura://ApexActionController/ACTION$execute"
 _USAGE_NAMESPACE = "vlocity_cmt"
 _USAGE_CONTROLLER = "BusinessProcessDisplayController"
@@ -85,12 +86,19 @@ def _decode_usage_response(response_text: str) -> dict[str, object]:
         state="Aura response",
     )
     actions = envelope.get("actions")
-    if not isinstance(actions, list) or len(actions) != 1:
-        raise UsageValidationError(
-            f"Aura response expected one action, got {type(actions).__name__}: "
-            f"{actions!r}"
-        )
-    action = _object(actions[0], state="Aura action")
+    if not isinstance(actions, list):
+        raise UsageValidationError("Aura response actions must be a list")
+    action = None
+    for value in actions:
+        candidate = _object(value, state="Aura action")
+        if candidate.get("id") == _ACTION_ID:
+            if action is not None:
+                raise UsageValidationError(
+                    f"Aura response contains duplicate action {_ACTION_ID!r}"
+                )
+            action = candidate
+    if action is None:
+        raise UsageValidationError(f"Aura response is missing action {_ACTION_ID!r}")
     if action.get("state") != "SUCCESS":
         raise UsageValidationError(
             f"Aura usage action failed with state {action.get('state')!r}: {action!r}"
@@ -413,7 +421,7 @@ def _apex_action_message(
     namespace: str = "",
 ) -> str:
     action = {
-        "id": "1;a",
+        "id": _ACTION_ID,
         "descriptor": _ACTION_DESCRIPTOR,
         "callingDescriptor": "UNKNOWN",
         "params": {
@@ -484,7 +492,10 @@ def _usage_action_message(*, service_point_id: str, query: UsageQuery) -> str:
 
 def _contains_invalid_session_error(value: object) -> bool:
     if isinstance(value, str):
-        return "access to the apex class named" in value.casefold()
+        folded = value.casefold()
+        return "access to the apex class named" in folded or (
+            "don't have access to " in folded and " apex class" in folded
+        )
     if isinstance(value, dict):
         return any(_contains_invalid_session_error(item) for item in value.values())
     if isinstance(value, list):
@@ -492,16 +503,18 @@ def _contains_invalid_session_error(value: object) -> bool:
     return False
 
 
-def _is_invalid_session_payload(response_text: str) -> bool:
+def _invalid_session_error(response_text: str) -> str | None:
     try:
         ip_result = _decode_usage_response(response_text)
     except UsageValidationError:
-        return False
-    return (
+        return None
+    if (
         "ChartData" not in ip_result
         and set(ip_result) <= {"success", "error"}
-        and _contains_invalid_session_error(ip_result)
-    )
+        and _contains_invalid_session_error(ip_result.get("error"))
+    ):
+        return str(ip_result["error"])
+    return None
 
 
 def _is_login_redirect(response: httpx.Response) -> bool:
@@ -549,8 +562,10 @@ def _post_aura(
 
     if response.status_code == 401 or _is_login_redirect(response):
         raise SessionExpiredError("Synergy direct session expired")
-    if _is_invalid_session_payload(response.text):
-        raise SessionExpiredError("Synergy direct session was rejected")
+    if session_error := _invalid_session_error(response.text):
+        raise SessionExpiredError(
+            f"Synergy direct session was rejected: {session_error}"
+        )
 
     try:
         response.raise_for_status()

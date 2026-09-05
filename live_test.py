@@ -419,6 +419,20 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         lambda: _imported_statistics(token),
         timeout=120,
     )
+    print("Refreshing Home Assistant's incremental statistics...")
+    energy_sensor = next(
+        sensor
+        for sensor in sensors
+        if sensor["attributes"].get("device_class") == "energy"
+    )
+    _ha_request(
+        "POST",
+        "/api/services/homeassistant/update_entity",
+        token=token,
+        json_body={"entity_id": energy_sensor["entity_id"]},
+    )
+    if _status_sensors(token) is None:
+        raise RuntimeError("Home Assistant incremental statistics refresh failed")
     print("Configuring the Home Assistant Energy dashboard...")
     energy_preferences = _configure_energy_dashboard(token, list(statistics))
 

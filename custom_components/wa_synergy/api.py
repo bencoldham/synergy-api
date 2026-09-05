@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import urlencode
 
 from aiohttp import ClientError, ClientResponse, ClientSession
 
@@ -88,9 +89,7 @@ class SynergyServiceClient:
             raise InvalidAuth("the WA Synergy service rejected the API token")
         if response.status >= 400:
             await response.read()
-            raise CannotConnect(
-                f"WA Synergy service returned HTTP {response.status}"
-            )
+            raise CannotConnect(f"WA Synergy service returned HTTP {response.status}")
         try:
             return await response.json(content_type="application/json")
         except (ClientError, ValueError) as exc:
@@ -101,12 +100,10 @@ class SynergyServiceClient:
 
         return _status(await self._request("/v1/status"))
 
-    async def async_get_statistics(
-        self, since: datetime | None
-    ) -> StatisticsSnapshot:
+    async def async_get_statistics(self, since: datetime | None) -> StatisticsSnapshot:
         """Fetch and validate cumulative hourly statistics."""
 
-        suffix = f"?since={since.isoformat()}" if since is not None else ""
+        suffix = f"?{urlencode({'since': since.isoformat()})}" if since else ""
         payload = await self._request(f"/v1/statistics{suffix}")
         if not isinstance(payload, dict):
             raise InvalidResponse("statistics response must be an object")
@@ -189,6 +186,8 @@ def _status(value: object) -> ServiceStatus:
             value.get("last_success"), field="last successful sync"
         ),
         last_error=last_error,
-        data_through=_optional_datetime(value.get("data_through"), field="data through"),
+        data_through=_optional_datetime(
+            value.get("data_through"), field="data through"
+        ),
         service_points=tuple(service_points),
     )
