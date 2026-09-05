@@ -5,7 +5,7 @@ services:
       dockerfile: ha_test/Dockerfile.app
       args:
         BUILD_ARCH: amd64
-        BUILD_VERSION: "0.1.9"
+        BUILD_VERSION: "0.1.10"
     command: ["python", "-m", "wa_synergy.service"]
     environment:
       WA_SYNERGY_EMAIL: ${WA_SYNERGY_EMAIL:?WA_SYNERGY_EMAIL must be set}
