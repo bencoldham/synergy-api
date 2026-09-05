@@ -16,7 +16,8 @@ from dotenv import load_dotenv
 from websockets.sync.client import connect
 
 _COMPOSE_BIN = (
-    "docker" if shutil.which("docker") else "podman" if shutil.which("podman") else None
+    "docker" if shutil.which(
+        "docker") else "podman" if shutil.which("podman") else None
 )
 _COMPOSE = (
     ("docker", "compose", "-f", "compose.ha-test.yaml")
@@ -141,13 +142,14 @@ def _exercise_live_network_failure() -> None:
         "{{.ID}}",
     )
     if not container_id:
-        raise RuntimeError("cannot identify the running companion service container")
+        raise RuntimeError(
+            "cannot identify the running companion service container")
     inspected = json.loads(_runtime("inspect", container_id))
     labels = inspected[0]["Config"]["Labels"]
     expected_labels = {
         "io.hass.arch": "amd64",
         "io.hass.type": "app",
-        "io.hass.version": "0.1.7",
+        "io.hass.version": "0.1.8",
     }
     if any(labels.get(key) != value for key, value in expected_labels.items()):
         raise RuntimeError(
@@ -170,7 +172,8 @@ def _exercise_live_network_failure() -> None:
             timeout=90,
         )
         if _SYNC_THREAD_CRASH in failure_logs:
-            raise RuntimeError("synergy-sync thread crashed during network outage")
+            raise RuntimeError(
+                "synergy-sync thread crashed during network outage")
         if "| ERROR    | Traceback (most recent call last):" not in failure_logs:
             raise RuntimeError(
                 "companion traceback lines have no application timestamp"
@@ -391,7 +394,8 @@ def _configure_energy_dashboard(
 
 def _run_ha_verification(service_url: str = _APP_URL) -> None:
     print("Waiting for live Synergy synchronization...")
-    status = _wait_for("live Synergy synchronization", _app_status, timeout=900)
+    status = _wait_for("live Synergy synchronization",
+                       _app_status, timeout=900)
     print(
         f"Live sync complete: {len(status['service_points'])} service point(s), "
         f"data through {status['data_through']}"
@@ -432,7 +436,8 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         json_body={"entity_id": energy_sensor["entity_id"]},
     )
     if _status_sensors(token) is None:
-        raise RuntimeError("Home Assistant incremental statistics refresh failed")
+        raise RuntimeError(
+            "Home Assistant incremental statistics refresh failed")
     print("Configuring the Home Assistant Energy dashboard...")
     energy_preferences = _configure_energy_dashboard(token, list(statistics))
 
@@ -471,7 +476,8 @@ def main() -> None:
     )
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
-        raise RuntimeError(f"missing live Synergy credentials: {', '.join(missing)}")
+        raise RuntimeError(
+            f"missing live Synergy credentials: {', '.join(missing)}")
 
     if not _can_compose():
         raise RuntimeError(
