@@ -39,7 +39,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: SynergyConfigEntry) -> b
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = SynergyRuntimeData(client=client, coordinator=coordinator)
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_update_options))
     return True
+
+
+async def _async_update_options(hass: HomeAssistant, entry: SynergyConfigEntry) -> None:
+    """Recreate local tariff entities when the selected plan changes."""
+
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SynergyConfigEntry) -> bool:

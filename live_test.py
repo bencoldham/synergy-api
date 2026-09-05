@@ -19,8 +19,7 @@ from dotenv import load_dotenv
 from websockets.sync.client import connect
 
 _COMPOSE_BIN = (
-    "docker" if shutil.which(
-        "docker") else "podman" if shutil.which("podman") else None
+    "docker" if shutil.which("docker") else "podman" if shutil.which("podman") else None
 )
 _COMPOSE = (
     ("docker", "compose", "-f", "compose.ha-test.yaml")
@@ -35,6 +34,52 @@ _HA_PASSWORD = "wa-synergy-live-test-password"
 
 _SYNC_FAILURE = "Synchronization failed:"
 _SYNC_THREAD_CRASH = "Exception in thread synergy-sync"
+
+_TARIFF_SENSOR_KEYS = (
+    "electricity_price",
+    "daily_supply_charge",
+    "k1_first_20_price",
+    "k1_20_to_1650_price",
+    "k1_above_1650_price",
+)
+# Independently transcribed July 2026 published prices, in AUD (not cents).
+# Array index is the Perth hour; do not derive these from integration code.
+_EXPECTED_TARIFFS = {
+    "home_a1": {
+        "supply": "1.192419",
+        "prices": ["0.332621"] * 24,
+        "pricing_type": "flat",
+    },
+    "midday_saver": {
+        "supply": "1.327806",
+        "prices": (
+            ["0.243431"] * 9 + ["0.088520"] * 6 + ["0.553253"] * 6 + ["0.243431"] * 3
+        ),
+        "pricing_type": "time_of_use",
+    },
+    "electric_vehicle": {
+        "supply": "1.327806",
+        "prices": (
+            ["0.199172"] * 6
+            + ["0.243431"] * 3
+            + ["0.088520"] * 6
+            + ["0.553253"] * 6
+            + ["0.243431"] * 2
+            + ["0.199172"]
+        ),
+        "pricing_type": "time_of_use",
+    },
+    "home_business_k1": {
+        "supply": "2.104115",
+        "prices": [None] * 24,
+        "pricing_type": "tiered",
+    },
+    "not_set": {
+        "supply": None,
+        "prices": [None] * 24,
+        "pricing_type": "not_set",
+    },
+}
 
 
 def _can_compose() -> bool:
@@ -145,8 +190,7 @@ def _exercise_live_network_failure() -> None:
         "{{.ID}}",
     )
     if not container_id:
-        raise RuntimeError(
-            "cannot identify the running companion service container")
+        raise RuntimeError("cannot identify the running companion service container")
     inspected = json.loads(_runtime("inspect", container_id))
     labels = inspected[0]["Config"]["Labels"]
     expected_labels = {
@@ -175,8 +219,7 @@ def _exercise_live_network_failure() -> None:
             timeout=90,
         )
         if _SYNC_THREAD_CRASH in failure_logs:
-            raise RuntimeError(
-                "synergy-sync thread crashed during network outage")
+            raise RuntimeError("synergy-sync thread crashed during network outage")
         if "| ERROR    | Traceback (most recent call last):" not in failure_logs:
             raise RuntimeError(
                 "companion traceback lines have no application timestamp"
@@ -276,6 +319,7 @@ def _configure_integration(token: str, service_url: str = _APP_URL) -> dict[str,
         json_body={
             "url": service_url,
             "api_token": _APP_TOKEN,
+            "plan": "home_a1",
         },
     )
     if result["type"] != "create_entry":
@@ -302,9 +346,13 @@ def _status_sensors(token: str) -> list[dict[str, Any]] | None:
         is_period = sensor["unique_id"].endswith(
             ("_latest_day", "_last_7_days", "_month_to_date")
         )
+        is_tariff = sensor["unique_id"].endswith(
+            tuple(f"_{key}" for key in _TARIFF_SENSOR_KEYS)
+        )
         if sensor["state"] == "unavailable" or (
-            sensor["state"] == "unknown" and attributes.get(
-                "device_class") != "energy"
+            sensor["state"] == "unknown"
+            and attributes.get("device_class") != "energy"
+            and not is_tariff
         ):
             return None
         if attributes.get("device_class") == "energy":
@@ -341,6 +389,183 @@ def _ha_websocket(token: str, command: dict[str, Any]) -> Any:
             return response["result"]
 
 
+def _select_tariff(token: str, entry_id: str, plan: str) -> None:
+    """Submit the real Home Assistant options flow."""
+    flow = _ha_request(
+        "POST",
+        "/api/config/config_entries/options/flow",
+        token=token,
+        json_body={"handler": entry_id},
+    )
+    assert flow["type"] == "form", flow
+    result = _ha_request(
+        "POST",
+        f"/api/config/config_entries/options/flow/{flow['flow_id']}",
+        token=token,
+        json_body={"plan": plan},
+    )
+    assert result["type"] == "create_entry", result
+
+
+def _verify_tariff(token: str, entry_id: str, plan: str) -> dict[str, dict[str, Any]]:
+    """Check live entities against published prices, not tariff implementation."""
+    expected = _EXPECTED_TARIFFS[plan]
+
+    def ready() -> tuple[dict[str, dict[str, Any]], int] | None:
+        entries = _ha_request("GET", "/api/config/config_entries/entry", token=token)
+        if not any(
+            item["entry_id"] == entry_id and item["state"] == "loaded"
+            for item in entries
+        ):
+            return None
+        registry = _ha_websocket(token, {"type": "config/entity_registry/list"})
+        entity_keys = {
+            entity["entity_id"]: key
+            for entity in registry
+            if entity["config_entry_id"] == entry_id
+            for key in _TARIFF_SENSOR_KEYS
+            if entity["unique_id"].endswith(f"_{key}")
+        }
+        before = datetime.now(ZoneInfo("Australia/Perth"))
+        states = _ha_request("GET", "/api/states", token=token)
+        after = datetime.now(ZoneInfo("Australia/Perth"))
+        # Avoid testing against a different hour from the one actually read.
+        if (before.date(), before.hour) != (after.date(), after.hour):
+            return None
+        sensors = {
+            entity_keys[state["entity_id"]]: state
+            for state in states
+            if state["entity_id"] in entity_keys
+        }
+        if any(key not in sensors for key in _TARIFF_SENSOR_KEYS):
+            return None
+        if any(sensor["state"] == "unavailable" for sensor in sensors.values()):
+            return None
+        if sensors["electricity_price"]["attributes"].get("plan") != plan:
+            return None
+        return sensors, after.hour
+
+    sensors, hour = _wait_for(f"loaded {plan} tariff entities", ready, timeout=120)
+
+    def check_price(key: str, wanted: str | None, unit: str = "AUD/kWh") -> None:
+        sensor = sensors[key]
+        assert sensor["attributes"]["unit_of_measurement"] == unit, sensor
+        if wanted is None:
+            assert sensor["state"] == "unknown", (plan, key, sensor)
+        else:
+            assert Decimal(sensor["state"]) == Decimal(wanted), (
+                plan,
+                key,
+                sensor,
+                wanted,
+            )
+
+    check_price("electricity_price", expected["prices"][hour])
+    check_price("daily_supply_charge", expected["supply"], "AUD/day")
+    for key, price in (
+        ("k1_first_20_price", "0.347481"),
+        ("k1_20_to_1650_price", "0.327455"),
+        ("k1_above_1650_price", "0.369194"),
+    ):
+        check_price(key, price if plan == "home_business_k1" else None)
+    attributes = sensors["electricity_price"]["attributes"]
+    assert attributes["rates_effective_from"] == "2026-07-01", attributes
+    assert attributes["time_zone"] == "Australia/Perth", attributes
+    assert attributes["pricing_type"] == expected["pricing_type"], attributes
+    if plan == "not_set":
+        assert attributes["source_url"] is None, attributes
+    else:
+        assert attributes["source_url"].startswith("https://www.synergy.net.au/"), (
+            attributes
+        )
+    periods_by_price = {
+        "0.332621": "flat",
+        "0.243431": "off_peak",
+        "0.088520": "super_off_peak",
+        "0.553253": "peak",
+        "0.199172": "overnight",
+    }
+    schedule = attributes["hourly_prices"]
+    assert len(schedule) == 24, (plan, schedule)
+    for scheduled_hour, (row, price) in enumerate(
+        zip(schedule, expected["prices"], strict=True)
+    ):
+        assert row["hour"] == scheduled_hour, (plan, row, scheduled_hour)
+        if price is None:
+            assert row["price"] is None and row["period"] is None, (plan, row)
+        else:
+            assert isinstance(row["price"], (int, float)), (plan, row)
+            assert Decimal(str(row["price"])) == Decimal(price), (plan, row, price)
+            assert row["period"] == periods_by_price[price], (plan, row, price)
+    assert attributes["period"] == schedule[hour]["period"], attributes
+    print(
+        f"Tariff {plan}: Perth hour {hour:02d}, "
+        f"price={sensors['electricity_price']['state']} AUD/kWh, "
+        f"supply={sensors['daily_supply_charge']['state']} AUD/day; "
+        "24 published hourly prices verified"
+    )
+    if plan == "home_business_k1":
+        print(
+            "K1 tier prices verified:",
+            ", ".join(
+                f"{key}={sensors[key]['state']} AUD/kWh"
+                for key in _TARIFF_SENSOR_KEYS[2:]
+            ),
+        )
+    return sensors
+
+
+def _exercise_tariffs(token: str, entry_id: str) -> None:
+    _verify_tariff(token, entry_id, "home_a1")
+    for plan in (
+        "midday_saver",
+        "electric_vehicle",
+        "home_business_k1",
+        "not_set",
+        "home_a1",
+    ):
+        _select_tariff(token, entry_id, plan)
+        _verify_tariff(token, entry_id, plan)
+        result = _ha_request(
+            "POST",
+            f"/api/config/config_entries/entry/{entry_id}/reload",
+            token=token,
+        )
+        assert result["require_restart"] is False, result
+        _verify_tariff(token, entry_id, plan)
+        print(f"Tariff option {plan} persisted an explicit config-entry reload")
+        if plan == "electric_vehicle":
+            _ha_websocket(
+                token,
+                {"type": "config/core/update", "time_zone": "America/New_York"},
+            )
+            try:
+                config = _ha_request("GET", "/api/config", token=token)
+                assert config["time_zone"] == "America/New_York", config
+                result = _ha_request(
+                    "POST",
+                    f"/api/config/config_entries/entry/{entry_id}/reload",
+                    token=token,
+                )
+                assert result["require_restart"] is False, result
+                _verify_tariff(token, entry_id, plan)
+                print(
+                    "EV tariff retained published Perth-hour pricing after "
+                    "reloading with Home Assistant in America/New_York"
+                )
+            finally:
+                _ha_websocket(
+                    token,
+                    {"type": "config/core/update", "time_zone": "Australia/Perth"},
+                )
+            config = _ha_request("GET", "/api/config", token=token)
+            assert config["time_zone"] == "Australia/Perth", config
+    print(
+        "Tariff options restored to home_a1. Hourly clock-boundary behavior "
+        "was not exercised; current rates were checked at the actual Perth hour."
+    )
+
+
 def _app_statistics(since: datetime | None = None) -> dict[str, Any]:
     response = httpx.get(
         f"{_APP_URL}/v1/statistics",
@@ -362,8 +587,7 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
         grouped[point["service_point_id"]].append(point)
 
     def period(daily: dict[date, Decimal], start: date, end: date) -> dict[str, Any]:
-        days = [start + timedelta(days=i)
-                for i in range((end - start).days + 1)]
+        days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
         return {
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
@@ -390,8 +614,7 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
             midnight = datetime.combine(day, datetime.min.time(), tzinfo=perth)
             required = [midnight + timedelta(hours=hour) for hour in range(24)]
             if all(hour in hours for hour in required):
-                daily[day] = sum((hours[hour]
-                                 for hour in required), Decimal(0))
+                daily[day] = sum((hours[hour] for hour in required), Decimal(0))
 
         summary: dict[str, Any] = {
             "service_point_id": service_id,
@@ -403,8 +626,7 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
         if daily:
             latest = max(daily)
             summary["latest_day"] = period(daily, latest, latest)
-            summary["last_7_days"] = period(
-                daily, latest - timedelta(days=6), latest)
+            summary["last_7_days"] = period(daily, latest - timedelta(days=6), latest)
             month_start = today.replace(day=1)
             if latest >= month_start:
                 summary["month_to_date"] = period(daily, month_start, latest)
@@ -415,15 +637,13 @@ def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any
 def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     expected = _expected_summaries(snapshot["statistics"])
     assert expected, "live account returned no complete hourly import data"
-    actual = {summary["service_point_id"]              : summary for summary in snapshot["summaries"]}
-    assert len(actual) == len(
-        snapshot["summaries"]), "duplicate service summaries"
+    actual = {summary["service_point_id"]: summary for summary in snapshot["summaries"]}
+    assert len(actual) == len(snapshot["summaries"]), "duplicate service summaries"
     assert actual.keys() == expected.keys(), (actual.keys(), expected.keys())
     for service_id, summary in expected.items():
         received = actual[service_id]
         assert isinstance(received["total_import_kwh"], str), received
-        assert Decimal(received["total_import_kwh"]
-                       ) == summary["total_import_kwh"]
+        assert Decimal(received["total_import_kwh"]) == summary["total_import_kwh"]
         for key in ("latest_day", "last_7_days", "month_to_date"):
             wanted = summary[key]
             if wanted is None:
@@ -445,8 +665,7 @@ def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str
     ):
         filtered = _app_statistics(since)
         if since == future:
-            assert filtered["statistics"] == [
-            ], "future since returned hourly data"
+            assert filtered["statistics"] == [], "future since returned hourly data"
         assert filtered["summaries"] == snapshot["summaries"], (
             "summaries changed when filtering hourly statistics",
             since,
@@ -516,8 +735,7 @@ def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str
     sync = sensor_for("sync_status")
     assert sync["state"] == "idle", sync
     assert sync["attributes"]["device_class"] == "enum", sync
-    assert set(sync["attributes"]["options"]) == {
-        "waiting", "syncing", "idle", "error"}
+    assert set(sync["attributes"]["options"]) == {"waiting", "syncing", "idle", "error"}
     assert "last_error" in sync["attributes"], sync
     assert sync["attributes"]["last_error"] == status["last_error"], sync
     return sensors
@@ -569,8 +787,7 @@ def _imported_statistics(
             actual[timestamp] = row["sum"]
         if actual.keys() != hourly.keys():
             return None
-        assert len(actual) == len(
-            rows), f"duplicate Recorder hours: {statistic_id}"
+        assert len(actual) == len(rows), f"duplicate Recorder hours: {statistic_id}"
         for timestamp, total in hourly.items():
             assert actual[timestamp] is not None, (statistic_id, timestamp)
             assert abs(Decimal(str(actual[timestamp])) - total) < Decimal("0.000001"), (
@@ -622,8 +839,7 @@ def _configure_energy_dashboard(
 
 def _run_ha_verification(service_url: str = _APP_URL) -> None:
     print("Waiting for live Synergy synchronization...")
-    status = _wait_for("live Synergy synchronization",
-                       _app_status, timeout=900)
+    status = _wait_for("live Synergy synchronization", _app_status, timeout=900)
     print(
         f"Live sync complete: {len(status['service_points'])} service point(s), "
         f"data through {status['data_through']}"
@@ -645,6 +861,7 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         lambda: _status_sensors(token),
         timeout=120,
     )
+    _exercise_tariffs(token, entry["result"]["entry_id"])
     snapshot = _app_statistics()
     sensors = _verify_usage_sensors(token, snapshot)
     print("Waiting for WA Synergy Recorder statistics...")
@@ -671,6 +888,7 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         timeout=120,
     )
     print("Configuring the Home Assistant Energy dashboard...")
+    # Delayed historical consumption must not use today's tariff for costs.
     energy_preferences = _configure_energy_dashboard(token, list(statistics))
 
     print(
@@ -710,8 +928,7 @@ def main() -> None:
     )
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
-        raise RuntimeError(
-            f"missing live Synergy credentials: {', '.join(missing)}")
+        raise RuntimeError(f"missing live Synergy credentials: {', '.join(missing)}")
 
     if not _can_compose():
         raise RuntimeError(

@@ -8,8 +8,11 @@ from urllib.parse import urlsplit
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_URL
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -17,12 +20,22 @@ from homeassistant.helpers.selector import (
 
 from .api import CannotConnect, InvalidAuth, InvalidResponse, SynergyServiceClient
 from .const import CONF_API_TOKEN, DEFAULT_URL, DOMAIN
+from .tariffs import CONF_PLAN, DEFAULT_PLAN, PLAN_OPTIONS
 
 
 class SynergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure a WA Synergy companion service."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> SynergyOptionsFlow:
+        """Allow tariff selection without changing service credentials."""
+
+        return SynergyOptionsFlow()
 
     async def _validate(self, data: dict[str, Any]) -> str:
         base_url = _normalized_url(data[CONF_URL])
@@ -51,11 +64,12 @@ class SynergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(instance_id)
                 self._abort_if_unique_id_configured()
+                user_input.setdefault(CONF_PLAN, DEFAULT_PLAN)
                 return self.async_create_entry(title="WA Synergy", data=user_input)
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_schema(user_input),
+            data_schema=_schema(user_input).extend(_plan_schema(user_input).schema),
             errors=errors,
         )
 
@@ -101,6 +115,48 @@ class SynergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
 
+class SynergyOptionsFlow(config_entries.OptionsFlow):
+    """Select the published tariff used locally by Home Assistant."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Manage tariff selection."""
+
+        if user_input is not None:
+            return self.async_create_entry(
+                title="",
+                data={CONF_PLAN: user_input.get(CONF_PLAN, DEFAULT_PLAN)},
+            )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=_plan_schema(
+                {
+                    CONF_PLAN: self.config_entry.options.get(
+                        CONF_PLAN, self.config_entry.data.get(CONF_PLAN, DEFAULT_PLAN)
+                    )
+                }
+            ),
+        )
+
+
+def _plan_schema(values: dict[str, Any] | None) -> vol.Schema:
+    values = values or {}
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_PLAN, default=values.get(CONF_PLAN, DEFAULT_PLAN)
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=list(PLAN_OPTIONS),
+                    translation_key="plan",
+                )
+            )
+        }
+    )
+
+
 def _schema(values: dict[str, Any] | None) -> vol.Schema:
     values = values or {}
     return vol.Schema(
@@ -109,9 +165,7 @@ def _schema(values: dict[str, Any] | None) -> vol.Schema:
             vol.Required(
                 CONF_API_TOKEN,
                 default=values.get(CONF_API_TOKEN, ""),
-            ): TextSelector(
-                TextSelectorConfig(type=TextSelectorType.PASSWORD)
-            ),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         }
     )
 
