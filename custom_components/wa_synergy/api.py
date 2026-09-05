@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlencode
@@ -51,11 +51,31 @@ class StatisticPoint:
 
 
 @dataclass(frozen=True, slots=True)
+class UsagePeriod:
+    """Import energy over inclusive Perth calendar dates, or incomplete coverage."""
+
+    start_date: date
+    end_date: date
+    import_kwh: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class UsageSummary:
+    """Full-history totals and complete-day consumption windows."""
+
+    total_import_kwh: Decimal
+    latest_day: UsagePeriod | None
+    last_7_days: UsagePeriod | None
+    month_to_date: UsagePeriod | None
+
+
+@dataclass(frozen=True, slots=True)
 class StatisticsSnapshot:
     """Status and statistics returned by one service request."""
 
     status: ServiceStatus
     statistics: tuple[StatisticPoint, ...]
+    summaries: dict[str, UsageSummary]
 
 
 class SynergyServiceClient:
@@ -121,15 +141,7 @@ class SynergyServiceClient:
             if not isinstance(service_point_id, str) or not service_point_id:
                 raise InvalidResponse("statistic service point is invalid")
             start = _datetime(value.get("start"), field="statistic start")
-            raw_sum = value.get("sum_kwh")
-            if not isinstance(raw_sum, str):
-                raise InvalidResponse("statistic sum is invalid")
-            try:
-                sum_kwh = Decimal(raw_sum)
-            except InvalidOperation as exc:
-                raise InvalidResponse("statistic sum is invalid") from exc
-            if not sum_kwh.is_finite() or sum_kwh < 0:
-                raise InvalidResponse("statistic sum is invalid")
+            sum_kwh = _energy(value.get("sum_kwh"), field="statistic sum")
             identity = (service_point_id, start)
             if identity in identities:
                 raise InvalidResponse("statistics contain a duplicate hour")
@@ -141,7 +153,73 @@ class SynergyServiceClient:
                     sum_kwh=sum_kwh,
                 )
             )
-        return StatisticsSnapshot(status=status, statistics=tuple(statistics))
+        raw_summaries = payload.get("summaries")
+        if not isinstance(raw_summaries, list):
+            raise InvalidResponse(
+                "usage summaries must be a list; update the companion app"
+            )
+        summaries: dict[str, UsageSummary] = {}
+        for value in raw_summaries:
+            if not isinstance(value, dict):
+                raise InvalidResponse("usage summary must be an object")
+            service_point_id = value.get("service_point_id")
+            if not isinstance(service_point_id, str) or not service_point_id:
+                raise InvalidResponse("summary service point is invalid")
+            if service_point_id in summaries:
+                raise InvalidResponse(
+                    "usage summaries contain a duplicate service point"
+                )
+            summaries[service_point_id] = UsageSummary(
+                total_import_kwh=_energy(
+                    value.get("total_import_kwh"), field="total import"
+                ),
+                latest_day=_period(value.get("latest_day")),
+                last_7_days=_period(value.get("last_7_days")),
+                month_to_date=_period(value.get("month_to_date")),
+            )
+        return StatisticsSnapshot(
+            status=status, statistics=tuple(statistics), summaries=summaries
+        )
+
+
+def _energy(value: object, *, field: str) -> Decimal:
+    if not isinstance(value, str):
+        raise InvalidResponse(f"{field} is invalid")
+    try:
+        energy = Decimal(value)
+    except InvalidOperation as exc:
+        raise InvalidResponse(f"{field} is invalid") from exc
+    if not energy.is_finite() or energy < 0:
+        raise InvalidResponse(f"{field} is invalid")
+    return energy
+
+
+def _period(value: object) -> UsagePeriod | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise InvalidResponse("usage period must be an object")
+    start = value.get("start_date")
+    end = value.get("end_date")
+    if not isinstance(start, str) or not isinstance(end, str):
+        raise InvalidResponse("usage period dates are invalid")
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+    except ValueError as exc:
+        raise InvalidResponse("usage period dates are invalid") from exc
+    if (
+        start_date.isoformat() != start
+        or end_date.isoformat() != end
+        or start_date > end_date
+    ):
+        raise InvalidResponse("usage period dates are invalid")
+    energy = value.get("import_kwh")
+    return UsagePeriod(
+        start_date=start_date,
+        end_date=end_date,
+        import_kwh=None if energy is None else _energy(energy, field="period import"),
+    )
 
 
 def _datetime(value: object, *, field: str) -> datetime:

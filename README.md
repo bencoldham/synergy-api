@@ -82,6 +82,42 @@ window. `VAL_SOLAR` is retained in the source database but is not exposed as
 generation or export because the provider response does not establish that
 meaning.
 
+### Sensors
+
+Each service point exposes these energy sensors:
+
+| Sensor | Meaning |
+| --- | --- |
+| Grid import | Cumulative kWh across the app's stored complete hourly readings, not a lifetime meter reading. |
+| Latest day usage | Import kWh for the latest complete reported Perth calendar day. |
+| Last 7 days usage | Import kWh for seven consecutive complete days ending on that reported day. |
+| Month to date usage | Import kWh from the first of the current Perth month through that reported day. |
+
+The three period sensors include inclusive `start_date` and `end_date` attributes.
+A complete day requires all 24 complete hourly readings. Missing coverage yields
+`unknown`, never zero or a partial period total. Month-to-date is also unknown if
+no complete day has been reported in the current month. These are delayed usage
+readings, not live power measurements or cost estimates.
+
+The cumulative sensor uses Home Assistant's `total` state class so downward
+provider corrections are not interpreted as meter resets. Period snapshots have
+no state class: adding their changing totals as new Energy dashboard consumption
+would double-count usage. Continue using the external hourly statistics described
+above for the Energy dashboard. Existing sensor unique IDs and Recorder statistic
+IDs are retained.
+
+Account-level diagnostics include:
+
+- **Data available through** and **Last successful sync** timestamps.
+- **Data age**, in hours since the available data ends.
+- **Sync status**: `waiting`, `syncing`, `idle`, or `error`, with a `last_error`
+  attribute containing the provider-sync error type.
+
+Diagnostics reflect the latest hourly integration poll; an unreachable app makes
+its entities unavailable. Update/rebuild the companion app before updating the
+integration, then restart Home Assistant: the new sensors require the app's
+full-history usage summaries.
+
 AppDaemon is not used. It would still require a custom Chromium-capable image and
 would need privileged WebSocket access to Recorder's statistics import API, while
 adding a second framework and YAML configuration instead of a native config flow.
@@ -93,7 +129,10 @@ companion app, synchronizes it against the real Synergy account configured in
 `.env`, starts Home Assistant 2026.9 in a container, completes onboarding,
 configures the integration, and verifies its sensors and Recorder statistics
 through Home Assistant's APIs, including a subsequent incremental statistics
-refresh with a timezone-aware `since` parameter.
+refresh with a timezone-aware `since` parameter. It independently calculates
+period totals from live hourly readings, checks the actual HA sensors and their
+reporting dates, and verifies Recorder sums. Summaries must remain unchanged even
+when a future `since` returns no hourly points.
 
 Install the development dependencies, then run the complete live test:
 
@@ -109,4 +148,11 @@ killing the sync thread, restores the network, and performs another live Synergy
 sync. Failures print timestamped container logs. The test then removes the
 containers and volumes. Set `WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS` to override the
 default 14-day live-data window.
+
+To verify that insufficient history leaves seven-day and month-to-date periods
+unknown where coverage is missing, run a short live backfill:
+
+```console
+WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS=3 python live_test.py
+```
 

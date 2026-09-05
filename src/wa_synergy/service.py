@@ -21,15 +21,29 @@ from zoneinfo import ZoneInfo
 
 from .client import SynergyClient
 from .config import SynergyCredentials
-from .errors import ConfigurationError, SynergyError
+from .errors import ConfigurationError, SynergyError, UsageValidationError
 from .models import UsageInterval, UsageQuery
-from .statistics import build_hourly_import_statistics
+from .statistics import (
+    ConsumptionPeriod,
+    build_consumption_summaries,
+    build_hourly_import_statistics,
+)
 from .storage import get_usage_intervals
 from .sync import sync_usage_to_db
 
 _LOGGER = logging.getLogger(__name__)
 _PERTH = ZoneInfo("Australia/Perth")
 _REQUEST_DAYS = 31
+
+
+def _period_payload(period: ConsumptionPeriod | None) -> dict[str, str | None] | None:
+    if period is None:
+        return None
+    return {
+        "start_date": period.start_date.isoformat(),
+        "end_date": period.end_date.isoformat(),
+        "import_kwh": str(period.import_kwh) if period.import_kwh is not None else None,
+    }
 
 
 def _log_sync_failure(exc: SynergyError) -> None:
@@ -179,12 +193,30 @@ class SynergyService:
         return self._status(get_usage_intervals(self.settings.db_path))
 
     def statistics(self, since: datetime | None) -> dict[str, object]:
-        """Return cumulative grid-import statistics and safe status."""
+        """Return full-history consumption summaries, hourly statistics and status."""
+
+        if since is not None:
+            if since.tzinfo is None or since.utcoffset() is None:
+                raise UsageValidationError("statistics since must be timezone-aware")
+            since = since.astimezone(UTC)
 
         intervals = get_usage_intervals(self.settings.db_path)
-        statistics = build_hourly_import_statistics(intervals, since=since)
+        statistics = build_hourly_import_statistics(intervals)
+        summaries = build_consumption_summaries(
+            statistics, today=datetime.now(_PERTH).date()
+        )
         return {
             "status": self._status(intervals),
+            "summaries": [
+                {
+                    "service_point_id": summary.service_point_id,
+                    "total_import_kwh": str(summary.total_import_kwh),
+                    "latest_day": _period_payload(summary.latest_day),
+                    "last_7_days": _period_payload(summary.last_7_days),
+                    "month_to_date": _period_payload(summary.month_to_date),
+                }
+                for summary in summaries
+            ],
             "statistics": [
                 {
                     "service_point_id": statistic.service_point_id,
@@ -193,6 +225,7 @@ class SynergyService:
                     "sum_kwh": str(statistic.sum_kwh),
                 }
                 for statistic in statistics
+                if since is None or statistic.start >= since
             ],
         }
 

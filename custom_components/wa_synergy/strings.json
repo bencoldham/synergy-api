@@ -37,6 +37,27 @@
       "grid_import": {
         "name": "Grid import {service_point_id}"
       },
+      "latest_day": {
+        "name": "Latest day usage {service_point_id}"
+      },
+      "last_7_days": {
+        "name": "Last 7 days usage {service_point_id}"
+      },
+      "month_to_date": {
+        "name": "Month to date usage {service_point_id}"
+      },
+      "data_age": {
+        "name": "Data age"
+      },
+      "sync_status": {
+        "name": "Sync status",
+        "state": {
+          "waiting": "Waiting for first sync",
+          "syncing": "Syncing",
+          "idle": "Idle",
+          "error": "Error"
+        }
+      },
       "last_success": {
         "name": "Last successful sync"
       }

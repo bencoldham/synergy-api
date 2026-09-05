@@ -7,17 +7,19 @@ import os
 import shutil
 import subprocess
 import time
+from collections import defaultdict
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
 from websockets.sync.client import connect
 
 _COMPOSE_BIN = (
-    "docker" if shutil.which(
-        "docker") else "podman" if shutil.which("podman") else None
+    "docker" if shutil.which("docker") else "podman" if shutil.which("podman") else None
 )
 _COMPOSE = (
     ("docker", "compose", "-f", "compose.ha-test.yaml")
@@ -142,8 +144,7 @@ def _exercise_live_network_failure() -> None:
         "{{.ID}}",
     )
     if not container_id:
-        raise RuntimeError(
-            "cannot identify the running companion service container")
+        raise RuntimeError("cannot identify the running companion service container")
     inspected = json.loads(_runtime("inspect", container_id))
     labels = inspected[0]["Config"]["Labels"]
     expected_labels = {
@@ -172,8 +173,7 @@ def _exercise_live_network_failure() -> None:
             timeout=90,
         )
         if _SYNC_THREAD_CRASH in failure_logs:
-            raise RuntimeError(
-                "synergy-sync thread crashed during network outage")
+            raise RuntimeError("synergy-sync thread crashed during network outage")
         if "| ERROR    | Traceback (most recent call last):" not in failure_logs:
             raise RuntimeError(
                 "companion traceback lines have no application timestamp"
@@ -281,24 +281,35 @@ def _configure_integration(token: str, service_url: str = _APP_URL) -> dict[str,
 
 
 def _status_sensors(token: str) -> list[dict[str, Any]] | None:
-    states = _ha_request("GET", "/api/states", token=token)
+    registry = _ha_websocket(token, {"type": "config/entity_registry/list"})
+    unique_ids = {
+        entity["entity_id"]: entity["unique_id"]
+        for entity in registry
+        if entity["platform"] == "wa_synergy"
+    }
     sensors = [
-        state for state in states if state["entity_id"].startswith("sensor.wa_synergy_")
+        {**state, "unique_id": unique_ids[state["entity_id"]]}
+        for state in _ha_request("GET", "/api/states", token=token)
+        if state["entity_id"] in unique_ids
     ]
-    energy_sensors = [
-        state
-        for state in sensors
-        if state["attributes"].get("device_class") == "energy"
-        and state["attributes"].get("state_class") == "total_increasing"
-        and state["attributes"].get("unit_of_measurement") == "kWh"
-    ]
-    if (
-        len(sensors) >= 3
-        and energy_sensors
-        and all(state["state"] not in {"unknown", "unavailable"} for state in sensors)
-    ):
-        return sensors
-    return None
+    if len(sensors) != len(unique_ids) or not sensors:
+        return None
+    for sensor in sensors:
+        attributes = sensor["attributes"]
+        is_period = sensor["unique_id"].endswith(
+            ("_latest_day", "_last_7_days", "_month_to_date")
+        )
+        if sensor["state"] == "unavailable" or (
+            sensor["state"] == "unknown" and attributes.get("device_class") != "energy"
+        ):
+            return None
+        if attributes.get("device_class") == "energy":
+            if attributes.get("unit_of_measurement") != "kWh":
+                raise RuntimeError(f"invalid energy unit: {sensor}")
+            expected_class = None if is_period else "total"
+            if attributes.get("state_class") != expected_class:
+                raise RuntimeError(f"invalid energy state class: {sensor}")
+    return sensors
 
 
 def _ha_websocket(token: str, command: dict[str, Any]) -> Any:
@@ -326,7 +337,184 @@ def _ha_websocket(token: str, command: dict[str, Any]) -> Any:
             return response["result"]
 
 
-def _imported_statistics(token: str) -> dict[str, list[dict[str, Any]]] | None:
+def _app_statistics(since: datetime | None = None) -> dict[str, Any]:
+    response = httpx.get(
+        f"{_APP_URL}/v1/statistics",
+        headers={"Authorization": f"Bearer {_APP_TOKEN}"},
+        params={"since": since.isoformat()} if since is not None else None,
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _expected_summaries(points: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Derive consumption from cumulative points, without using service summaries."""
+    perth = ZoneInfo("Australia/Perth")
+    today = datetime.now(perth).date()
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for point in points:
+        assert point["stream"] == "grid_import", point
+        grouped[point["service_point_id"]].append(point)
+
+    def period(daily: dict[date, Decimal], start: date, end: date) -> dict[str, Any]:
+        days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        return {
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "import_kwh": (
+                sum((daily[day] for day in days), Decimal(0))
+                if all(day in daily for day in days)
+                else None
+            ),
+        }
+
+    expected = {}
+    for service_id, service_points in grouped.items():
+        hours: dict[datetime, Decimal] = {}
+        previous = Decimal(0)
+        for point in sorted(service_points, key=lambda item: item["start"]):
+            start = datetime.fromisoformat(point["start"]).astimezone(perth)
+            assert start.minute == start.second == start.microsecond == 0, point
+            assert start not in hours, point
+            cumulative = Decimal(point["sum_kwh"])
+            hours[start] = cumulative - previous
+            previous = cumulative
+        daily: dict[date, Decimal] = {}
+        for day in {hour.date() for hour in hours if hour.date() < today}:
+            midnight = datetime.combine(day, datetime.min.time(), tzinfo=perth)
+            required = [midnight + timedelta(hours=hour) for hour in range(24)]
+            if all(hour in hours for hour in required):
+                daily[day] = sum((hours[hour] for hour in required), Decimal(0))
+
+        summary: dict[str, Any] = {
+            "service_point_id": service_id,
+            "total_import_kwh": previous,
+            "latest_day": None,
+            "last_7_days": None,
+            "month_to_date": None,
+        }
+        if daily:
+            latest = max(daily)
+            summary["latest_day"] = period(daily, latest, latest)
+            summary["last_7_days"] = period(daily, latest - timedelta(days=6), latest)
+            month_start = today.replace(day=1)
+            if latest >= month_start:
+                summary["month_to_date"] = period(daily, month_start, latest)
+        expected[service_id] = summary
+    return expected
+
+
+def _verify_usage_sensors(token: str, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    expected = _expected_summaries(snapshot["statistics"])
+    assert expected, "live account returned no complete hourly import data"
+    actual = {summary["service_point_id"]: summary for summary in snapshot["summaries"]}
+    assert len(actual) == len(snapshot["summaries"]), "duplicate service summaries"
+    assert actual.keys() == expected.keys(), (actual.keys(), expected.keys())
+    for service_id, summary in expected.items():
+        received = actual[service_id]
+        assert isinstance(received["total_import_kwh"], str), received
+        assert Decimal(received["total_import_kwh"]) == summary["total_import_kwh"]
+        for key in ("latest_day", "last_7_days", "month_to_date"):
+            wanted = summary[key]
+            if wanted is None:
+                assert received[key] is None, (service_id, key, received[key])
+                continue
+            assert received[key] is not None, (service_id, key, wanted)
+            assert received[key]["start_date"] == wanted["start_date"]
+            assert received[key]["end_date"] == wanted["end_date"]
+            value = received[key]["import_kwh"]
+            assert value is None or isinstance(value, str), received[key]
+            assert (Decimal(value) if value is not None else None) == wanted[
+                "import_kwh"
+            ]
+
+    future = datetime.now(UTC) + timedelta(days=365)
+    for since in (
+        future,
+        datetime.now(UTC) - timedelta(days=31),
+    ):
+        filtered = _app_statistics(since)
+        if since == future:
+            assert filtered["statistics"] == [], "future since returned hourly data"
+        assert filtered["summaries"] == snapshot["summaries"], (
+            "summaries changed when filtering hourly statistics",
+            since,
+        )
+        assert filtered["statistics"] == [
+            point
+            for point in snapshot["statistics"]
+            if datetime.fromisoformat(point["start"]) >= since
+        ], (
+            "since must filter only hourly points, retaining full-history cumulative sums"
+        )
+
+    sensors = _status_sensors(token)
+    assert sensors is not None, "Home Assistant sensors are not ready"
+    by_id = {sensor["unique_id"]: sensor for sensor in sensors}
+    status = snapshot["status"]
+    prefix = status["instance_id"]
+
+    def sensor_for(key: str) -> dict[str, Any]:
+        return by_id[f"{prefix}_{key}"]
+
+    def check_energy(sensor: dict[str, Any], value: Decimal | None) -> None:
+        assert sensor["attributes"]["device_class"] == "energy", sensor
+        assert sensor["attributes"]["unit_of_measurement"] == "kWh", sensor
+        if value is None:
+            assert sensor["state"] == "unknown", sensor
+        else:
+            assert abs(Decimal(sensor["state"]) - value) < Decimal("0.000001"), (
+                sensor,
+                value,
+            )
+
+    for service_id in status["service_points"]:
+        summary = expected.get(service_id)
+        service_key = service_id.casefold()
+        total = sensor_for(f"{service_key}_grid_import")
+        check_energy(total, summary["total_import_kwh"] if summary else None)
+        assert total["attributes"]["state_class"] == "total", total
+        for key in ("latest_day", "last_7_days", "month_to_date"):
+            sensor = sensor_for(f"{service_key}_{key}")
+            period = summary[key] if summary else None
+            check_energy(sensor, period["import_kwh"] if period else None)
+            assert sensor["attributes"].get("state_class") is None, sensor
+            for attribute in ("start_date", "end_date"):
+                assert sensor["attributes"].get(attribute) == (
+                    period[attribute] if period else None
+                ), sensor
+    for key in ("data_through", "last_success"):
+        sensor = sensor_for(key)
+        assert sensor["attributes"]["device_class"] == "timestamp", sensor
+        difference = datetime.fromisoformat(sensor["state"]) - datetime.fromisoformat(
+            status[key]
+        )
+        assert abs(difference.total_seconds()) < 1, sensor
+    age = sensor_for("data_age")
+    assert age["attributes"]["device_class"] == "duration", age
+    assert age["attributes"]["unit_of_measurement"] == "h", age
+    assert age["attributes"]["state_class"] == "measurement", age
+    expected_age = max(
+        0,
+        (
+            datetime.now(UTC) - datetime.fromisoformat(status["data_through"])
+        ).total_seconds()
+        / 3600,
+    )
+    assert abs(float(age["state"]) - expected_age) < 0.1, (age, expected_age)
+    sync = sensor_for("sync_status")
+    assert sync["state"] == "idle", sync
+    assert sync["attributes"]["device_class"] == "enum", sync
+    assert set(sync["attributes"]["options"]) == {"waiting", "syncing", "idle", "error"}
+    assert "last_error" in sync["attributes"], sync
+    assert sync["attributes"]["last_error"] == status["last_error"], sync
+    return sensors
+
+
+def _imported_statistics(
+    token: str, points: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]] | None:
     metadata = _ha_websocket(
         token,
         {"type": "recorder/list_statistic_ids", "statistic_type": "sum"},
@@ -336,22 +524,50 @@ def _imported_statistics(token: str) -> dict[str, list[dict[str, Any]]] | None:
         for item in metadata
         if item["statistic_id"].startswith("wa_synergy:")
     ]
+    expected: dict[str, dict[float, Decimal]] = defaultdict(dict)
+    for point in points:
+        statistic_id = f"wa_synergy:{point['service_point_id'].casefold()}_grid_import"
+        expected[statistic_id][datetime.fromisoformat(point["start"]).timestamp()] = (
+            Decimal(point["sum_kwh"])
+        )
     if not statistic_ids:
+        return None
+    if set(statistic_ids) != expected.keys():
         return None
     statistics = _ha_websocket(
         token,
         {
             "type": "recorder/statistics_during_period",
-            "start_time": (datetime.now(UTC) - timedelta(days=45)).isoformat(),
+            "start_time": min(point["start"] for point in points),
             "statistic_ids": statistic_ids,
             "period": "hour",
             "types": ["sum"],
             "units": {"energy": "kWh"},
         },
     )
-    if all(statistics.get(statistic_id) for statistic_id in statistic_ids):
-        return statistics
-    return None
+    for statistic_id, hourly in expected.items():
+        rows = statistics.get(statistic_id, [])
+        actual = {}
+        for row in rows:
+            start = row["start"]
+            timestamp = (
+                datetime.fromisoformat(start).timestamp()
+                if isinstance(start, str)
+                else start / 1000
+            )
+            actual[timestamp] = row["sum"]
+        if actual.keys() != hourly.keys():
+            return None
+        assert len(actual) == len(rows), f"duplicate Recorder hours: {statistic_id}"
+        for timestamp, total in hourly.items():
+            assert actual[timestamp] is not None, (statistic_id, timestamp)
+            assert abs(Decimal(str(actual[timestamp])) - total) < Decimal("0.000001"), (
+                statistic_id,
+                timestamp,
+                actual[timestamp],
+                total,
+            )
+    return statistics
 
 
 def _configure_energy_dashboard(
@@ -394,8 +610,7 @@ def _configure_energy_dashboard(
 
 def _run_ha_verification(service_url: str = _APP_URL) -> None:
     print("Waiting for live Synergy synchronization...")
-    status = _wait_for("live Synergy synchronization",
-                       _app_status, timeout=900)
+    status = _wait_for("live Synergy synchronization", _app_status, timeout=900)
     print(
         f"Live sync complete: {len(status['service_points'])} service point(s), "
         f"data through {status['data_through']}"
@@ -417,17 +632,17 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         lambda: _status_sensors(token),
         timeout=120,
     )
+    snapshot = _app_statistics()
+    sensors = _verify_usage_sensors(token, snapshot)
     print("Waiting for WA Synergy Recorder statistics...")
     statistics = _wait_for(
         "WA Synergy Recorder statistics",
-        lambda: _imported_statistics(token),
+        lambda: _imported_statistics(token, snapshot["statistics"]),
         timeout=120,
     )
     print("Refreshing Home Assistant's incremental statistics...")
     energy_sensor = next(
-        sensor
-        for sensor in sensors
-        if sensor["attributes"].get("device_class") == "energy"
+        sensor for sensor in sensors if sensor["unique_id"].endswith("_grid_import")
     )
     _ha_request(
         "POST",
@@ -435,9 +650,13 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         token=token,
         json_body={"entity_id": energy_sensor["entity_id"]},
     )
-    if _status_sensors(token) is None:
-        raise RuntimeError(
-            "Home Assistant incremental statistics refresh failed")
+    snapshot = _app_statistics()
+    sensors = _verify_usage_sensors(token, snapshot)
+    statistics = _wait_for(
+        "unchanged hourly Recorder sums after incremental refresh",
+        lambda: _imported_statistics(token, snapshot["statistics"]),
+        timeout=120,
+    )
     print("Configuring the Home Assistant Energy dashboard...")
     energy_preferences = _configure_energy_dashboard(token, list(statistics))
 
@@ -458,6 +677,8 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
         "Home Assistant sensors:",
         ", ".join(f"{item['entity_id']}={item['state']}" for item in sensors),
     )
+    print("Live usage summaries (kWh, inclusive Perth dates):")
+    print(json.dumps(snapshot["summaries"], indent=2))
     print(
         "Home Assistant Recorder:",
         ", ".join(
@@ -476,8 +697,7 @@ def main() -> None:
     )
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
-        raise RuntimeError(
-            f"missing live Synergy credentials: {', '.join(missing)}")
+        raise RuntimeError(f"missing live Synergy credentials: {', '.join(missing)}")
 
     if not _can_compose():
         raise RuntimeError(
