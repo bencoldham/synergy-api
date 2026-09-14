@@ -1,5 +1,5 @@
 name: WA Synergy
-version: "0.1.11"
+version: "0.1.12"
 slug: wa_synergy
 description: Fetch delayed WA Synergy usage for Home Assistant
 url: https://github.com/bencoldham/synergy-api
@@ -18,18 +18,14 @@ options:
   password: ""
   gmail_app_password: ""
   api_token: ""
-  sync_hours: 6
-  sync_retry_seconds: 300
+  sync_time: "06:10"
   backfill_days: 730
   refresh_days: 30
-  sync_on_start: true
 schema:
   email: str
   password: password
   gmail_app_password: password
   api_token: password
-  sync_hours: int(1,24)
-  sync_retry_seconds: int(1,3600)
+  sync_time: match(^(?:[01][0-9]|2[0-3]):[0-5][0-9]$)
   backfill_days: int(1,3650)
   refresh_days: int(1,365)
-  sync_on_start: bool

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -31,9 +32,6 @@ _HA_URL = "http://127.0.0.1:18123"
 _APP_TOKEN = "ha-live-test-token-0123456789abcdef0123456789"
 _HA_USERNAME = "wa-synergy-live-test"
 _HA_PASSWORD = "wa-synergy-live-test-password"
-
-_SYNC_FAILURE = "Synchronization failed:"
-_SYNC_THREAD_CRASH = "Exception in thread synergy-sync"
 
 _TARIFF_SENSOR_KEYS = (
     "electricity_price",
@@ -106,32 +104,6 @@ def _compose(*arguments: str, check: bool = True) -> None:
     )
 
 
-def _compose_output(*arguments: str) -> str:
-    result = subprocess.run(
-        (*_COMPOSE, *arguments),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout + result.stderr
-
-
-def _compose_logs() -> str:
-    return _compose_output("logs", "--timestamps", "synergy-app")
-
-
-def _runtime(*arguments: str) -> str:
-    if _COMPOSE_BIN is None:
-        raise RuntimeError("container runtime is unavailable")
-    result = subprocess.run(
-        (_COMPOSE_BIN, *arguments),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
 def _wait_for(
     description: str,
     probe: Callable[[], Any | None],
@@ -170,79 +142,52 @@ def _app_status() -> dict[str, Any] | None:
     return None
 
 
-def _recorded_sync_failure(previous_count: int) -> str | None:
-    logs = _compose_logs()
-    return logs if logs.count(_SYNC_FAILURE) > previous_count else None
-
-
-def _exercise_live_network_failure() -> None:
-    existing_logs = _compose_logs()
-    if _SYNC_THREAD_CRASH in existing_logs:
-        raise RuntimeError(
-            "companion sync thread crashed before network fault injection"
-        )
-
-    container_id = _runtime(
-        "ps",
-        "--filter",
-        "label=com.docker.compose.service=synergy-app",
-        "--format",
-        "{{.ID}}",
+def _sync_status() -> dict[str, Any]:
+    response = httpx.get(
+        f"{_APP_URL}/v1/status",
+        headers={"Authorization": f"Bearer {_APP_TOKEN}"},
+        timeout=10,
     )
-    if not container_id:
-        raise RuntimeError("cannot identify the running companion service container")
-    inspected = json.loads(_runtime("inspect", container_id))
-    labels = inspected[0]["Config"]["Labels"]
-    expected_labels = {
-        "io.hass.arch": "amd64",
-        "io.hass.type": "app",
-        "io.hass.version": "0.1.11",
-    }
-    if any(labels.get(key) != value for key, value in expected_labels.items()):
-        raise RuntimeError(
-            f"companion image has invalid Home Assistant labels: {labels}"
-        )
-    networks = tuple(inspected[0]["NetworkSettings"]["Networks"])
-    if len(networks) != 1:
-        raise RuntimeError(
-            f"expected one companion service network, found {len(networks)}"
-        )
-    network = networks[0]
+    response.raise_for_status()
+    return response.json()
 
-    print("Disconnecting the live companion container from the network...")
-    _runtime("network", "disconnect", network, container_id)
-    try:
-        _runtime("restart", container_id)
-        failure_logs = _wait_for(
-            "typed synchronization failure after a real network outage",
-            lambda: _recorded_sync_failure(existing_logs.count(_SYNC_FAILURE)),
-            timeout=90,
-        )
-        if _SYNC_THREAD_CRASH in failure_logs:
-            raise RuntimeError("synergy-sync thread crashed during network outage")
-        if "| ERROR    | Traceback (most recent call last):" not in failure_logs:
-            raise RuntimeError(
-                "companion traceback lines have no application timestamp"
-            )
-    finally:
-        _runtime("stop", container_id)
-        _runtime("network", "connect", network, container_id)
-        _runtime("start", container_id)
 
-    status = _wait_for(
-        "scheduled live synchronization after network restoration",
-        _app_status,
-        timeout=900,
+def _assert_sync_rejected() -> None:
+    response = httpx.post(
+        f"{_APP_URL}/v1/sync",
+        headers={"Authorization": f"Bearer {_APP_TOKEN}"},
+        timeout=10,
     )
-    recovered_logs = _compose_logs()
-    if _SYNC_THREAD_CRASH in recovered_logs:
+    assert response.status_code == 409, response.text
+
+
+def _exercise_daily_schedule(scheduled_sync: datetime) -> None:
+    """Check the actual service cannot sync twice, even after a restart."""
+    status = _sync_status()
+    completed = datetime.fromisoformat(status["last_success"]).astimezone(
+        ZoneInfo("Australia/Perth")
+    )
+    assert completed >= scheduled_sync
+    _assert_sync_rejected()
+    _compose("restart", "synergy-app")
+    status = _wait_for("restarted companion API", _sync_status, timeout=90)
+    assert status["last_success"] is None and not status["syncing"], status
+    _assert_sync_rejected()
+    # Move the configured minute forward on the same day: the persisted claim,
+    # not merely the in-memory lock or time gate, must reject another attempt.
+    next_sync = datetime.now(ZoneInfo("Australia/Perth")) + timedelta(minutes=2)
+    if next_sync.date() != scheduled_sync.date():
         raise RuntimeError(
-            "synergy-sync thread crashed instead of surviving the outage"
+            "daily schedule verification must not straddle Perth midnight"
         )
-    print(
-        "Live outage recovery complete:",
-        f"data through {status['data_through']}",
-    )
+    os.environ["WA_SYNERGY_SYNC_TIME"] = next_sync.strftime("%H:%M")
+    _compose("up", "--detach", "--force-recreate", "synergy-app")
+    _wait_for("reconfigured companion API", _sync_status, timeout=90)
+    time.sleep(max(0, (next_sync - datetime.now(next_sync.tzinfo)).total_seconds()))
+    _assert_sync_rejected()
+    status = _sync_status()
+    assert status["last_success"] is None and not status["syncing"], status
+    print("Daily AWST schedule verified: no startup, off-time, or repeat sync.")
 
 
 def _ha_request(
@@ -985,6 +930,9 @@ def _run_ha_verification(service_url: str = _APP_URL) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--schedule-only", action="store_true")
+    arguments = parser.parse_args()
     load_dotenv()
     required = (
         "WA_SYNERGY_EMAIL",
@@ -1002,9 +950,35 @@ def main() -> None:
 
     _compose("down", "--volumes", check=False)
     try:
-        _compose("up", "--build", "--detach")
-        _run_ha_verification(service_url="http://synergy-app:8099")
-        _exercise_live_network_failure()
+        _compose("build")
+        scheduled_sync = (
+            datetime.now(ZoneInfo("Australia/Perth")) + timedelta(minutes=2)
+        ).replace(second=0, microsecond=0)
+        os.environ["WA_SYNERGY_SYNC_TIME"] = scheduled_sync.strftime("%H:%M")
+        _compose("up", "--detach")
+        status = _wait_for(
+            "companion API before scheduled sync", _sync_status, timeout=60
+        )
+        assert datetime.now(scheduled_sync.tzinfo) < scheduled_sync
+        assert status["last_success"] is None and not status["syncing"], status
+        _assert_sync_rejected()
+        if arguments.schedule_only:
+            _wait_for("scheduled live sync", _app_status, timeout=900)
+            _wait_for(
+                "Home Assistant API",
+                lambda: _ha_request("GET", "/api/onboarding"),
+                timeout=180,
+            )
+            token = _onboard_home_assistant()
+            _configure_integration(token, service_url="http://synergy-app:8099")
+            _wait_for(
+                "Home Assistant status sensors",
+                lambda: _status_sensors(token),
+                timeout=120,
+            )
+        else:
+            _run_ha_verification(service_url="http://synergy-app:8099")
+        _exercise_daily_schedule(scheduled_sync)
     except BaseException:
         _compose("logs", "--timestamps", check=False)
         raise

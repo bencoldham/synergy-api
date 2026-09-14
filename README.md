@@ -74,6 +74,28 @@ The Home Assistant deployment has two parts:
    URL is `http://<home-assistant-host>:8099`. Select your electricity plan to
    enable tariff sensors, or leave it **Not configured**.
 
+### Daily synchronization
+
+App version **0.1.12** replaces the interval setting with `sync_time`, a quoted
+24-hour `HH:MM` value. The default is `"06:10"`: **6:10 am AWST every day**
+(`Australia/Perth`, UTC+08:00), independent of the host or Home Assistant timezone.
+For standalone deployments, set `WA_SYNERGY_SYNC_TIME=06:10`.
+
+The app waits for the next configured time; it does not sync immediately on startup
+or catch up a missed run. Startup-sync and short-interval retry options have been
+removed. A failed attempt waits until the next day's scheduled time.
+
+Attempts are recorded in SQLite before contacting Synergy, so restarting the app,
+changing the configured time, or calling `POST /v1/sync` cannot bypass the daily
+limit. Manual requests return HTTP 409 outside the configured minute or when an
+attempt has already claimed the day. Configured schedule slots must also be at
+least 24 hours apart. Keep the app's database volume across restarts.
+
+When upgrading, replace the previous interval configuration with
+`sync_time: "06:10"` and remove the old startup/retry settings.
+
+### Energy statistics
+
 The integration exposes cumulative `Grid import <service point>` energy and
 `Grid import cost <service point>` monetary sensors, and imports timestamped hourly
 grid-import and cost statistics into Recorder. To use the
@@ -205,12 +227,19 @@ python live_test.py
 ```
 
 The test starts `compose.ha-test.yaml` with fresh app and Home Assistant volumes.
-After the initial verification, it disconnects and restarts the real companion
-container, verifies that the resulting authentication failure is logged without
-killing the sync thread, restores the network, and performs another live Synergy
-sync. Failures print timestamped container logs. The test then removes the
-containers and volumes. Set `WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS` to override the
-default 14-day live-data window.
+It sets the sync time to an upcoming real Perth minute and checks that startup and
+off-time manual requests do not trigger a sync. After the live sync and HA checks,
+it restarts the app and moves the configured time forward to verify that the
+persisted daily limit blocks another attempt. No clocks or provider responses are
+mocked. The test then removes the containers and volumes. Set
+`WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS` to override the default 14-day live-data window.
+
+To run only the live scheduling checks, including HA integration setup and status
+sensors, without the tariff and Recorder scenarios:
+
+```console
+python live_test.py --schedule-only
+```
 
 To verify that insufficient history leaves seven-day and month-to-date periods
 unknown where coverage is missing, run a short live backfill:

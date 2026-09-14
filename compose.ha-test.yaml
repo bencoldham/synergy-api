@@ -5,7 +5,7 @@ services:
       dockerfile: ha_test/Dockerfile.app
       args:
         BUILD_ARCH: amd64
-        BUILD_VERSION: "0.1.11"
+        BUILD_VERSION: "0.1.12"
     command: ["python", "-m", "wa_synergy.service"]
     environment:
       WA_SYNERGY_EMAIL: ${WA_SYNERGY_EMAIL:?WA_SYNERGY_EMAIL must be set}
@@ -13,11 +13,9 @@ services:
       WA_SYNERGY_GMAIL_APP_PASSWORD: ${WA_SYNERGY_GMAIL_APP_PASSWORD:?WA_SYNERGY_GMAIL_APP_PASSWORD must be set}
       WA_SYNERGY_API_TOKEN: ha-live-test-token-0123456789abcdef0123456789
       WA_SYNERGY_DB_PATH: /data/synergy.sqlite3
-      WA_SYNERGY_SYNC_HOURS: "24"
-      WA_SYNERGY_SYNC_RETRY_SECONDS: "5"
+      WA_SYNERGY_SYNC_TIME: ${WA_SYNERGY_SYNC_TIME:-06:10}
       WA_SYNERGY_BACKFILL_DAYS: ${WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS:-14}
       WA_SYNERGY_REFRESH_DAYS: ${WA_SYNERGY_LIVE_TEST_BACKFILL_DAYS:-14}
-      WA_SYNERGY_SYNC_ON_START: "true"
     volumes:
       - synergy-app-data:/data
     ports:

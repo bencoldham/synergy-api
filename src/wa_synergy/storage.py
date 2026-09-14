@@ -8,7 +8,7 @@ import sqlite3
 import stat
 from collections.abc import Iterable
 from contextlib import closing
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -273,6 +273,36 @@ def _incoming_row(
     )
 
 
+def claim_daily_sync(db_path: Path, instance_id: str, now: datetime) -> bool:
+    """Persist an attempt before provider access, including failed attempts."""
+    path = _validated_path(db_path)
+    _prepare_database_file(path)
+    today = now.astimezone(_PERTH).date().isoformat()
+    attempted_at = _canonical_datetime(now, field="sync attempt")
+    cutoff = _canonical_datetime(now - timedelta(days=1), field="sync cutoff")
+    with closing(sqlite3.connect(path, isolation_level=None)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS service_sync_attempt (
+                instance_id TEXT PRIMARY KEY,
+                day TEXT NOT NULL,
+                attempted_at TEXT NOT NULL
+            )
+        """)
+        cursor = connection.execute(
+            """
+            INSERT INTO service_sync_attempt (instance_id, day, attempted_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(instance_id) DO UPDATE SET
+                day = excluded.day, attempted_at = excluded.attempted_at
+            WHERE service_sync_attempt.day < excluded.day
+                AND service_sync_attempt.attempted_at <= ?
+            """,
+            (instance_id, today, attempted_at, cutoff),
+        )
+        return cursor.rowcount == 1
+
+
 def upsert_usage_intervals(
     db_path: Path,
     intervals: Iterable[UsageInterval],
@@ -442,9 +472,7 @@ def get_usage_intervals(
             interval_end=parsed_datetime(row[5]),
             consumption_kwh=Decimal(row[6]),
             quality=row[7],
-            source_updated_at=(
-                parsed_datetime(row[8]) if row[8] is not None else None
-            ),
+            source_updated_at=(parsed_datetime(row[8]) if row[8] is not None else None),
         )
         for row in rows
     )

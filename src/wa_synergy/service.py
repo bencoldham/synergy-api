@@ -8,8 +8,10 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import traceback
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -28,7 +30,7 @@ from .statistics import (
     build_consumption_summaries,
     build_hourly_import_statistics,
 )
-from .storage import get_usage_intervals
+from .storage import claim_daily_sync, get_usage_intervals
 from .sync import sync_usage_to_db
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,11 +69,9 @@ class ServiceSettings:
     db_path: Path
     host: str = "0.0.0.0"
     port: int = 8099
-    sync_hours: int = 6
-    sync_retry_seconds: int = 300
+    sync_time: str = "06:10"
     backfill_days: int = 730
     refresh_days: int = 30
-    sync_on_start: bool = True
 
     def __post_init__(self) -> None:
         if len(self.api_token) < 32:
@@ -80,12 +80,12 @@ class ServiceSettings:
             )
         if not 1 <= self.port <= 65535:
             raise ConfigurationError("service port must be between 1 and 65535")
-        for name in (
-            "sync_hours",
-            "sync_retry_seconds",
-            "backfill_days",
-            "refresh_days",
+        if (
+            not isinstance(self.sync_time, str)
+            or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", self.sync_time) is None
         ):
+            raise ConfigurationError("service sync_time must be HH:MM in AWST")
+        for name in ("backfill_days", "refresh_days"):
             if getattr(self, name) < 1:
                 raise ConfigurationError(f"service {name} must be positive")
 
@@ -115,13 +115,28 @@ class SynergyService:
         self._client.close()
 
     def sync(self) -> dict[str, int]:
-        """Refresh either the initial backfill or the correction window."""
+        """Attempt a refresh only in the configured daily AWST minute."""
 
         if not self._sync_lock.acquire(blocking=False):
             raise ConfigurationError("a synchronization is already running")
-        with self._state_lock:
-            self._syncing = True
+        attempted = False
         try:
+            now = datetime.now(_PERTH)
+            if now.strftime("%H:%M") != self.settings.sync_time:
+                raise ConfigurationError(
+                    f"sync is only allowed at {self.settings.sync_time} AWST"
+                )
+            if not claim_daily_sync(
+                self.settings.db_path,
+                self.settings.instance_id,
+                now.replace(second=0, microsecond=0),
+            ):
+                raise ConfigurationError(
+                    "a sync has already been attempted within a day"
+                )
+            attempted = True
+            with self._state_lock:
+                self._syncing = True
             existing = get_usage_intervals(self.settings.db_path)
             days = (
                 self.settings.refresh_days if existing else self.settings.backfill_days
@@ -158,9 +173,10 @@ class SynergyService:
                 "unchanged": unchanged,
             }
         except SynergyError as exc:
-            with self._state_lock:
-                self._last_error = type(exc).__name__
-            _log_sync_failure(exc)
+            if attempted:
+                with self._state_lock:
+                    self._last_error = type(exc).__name__
+                _log_sync_failure(exc)
             raise
         finally:
             with self._state_lock:
@@ -338,14 +354,6 @@ def _load_settings(options_path: Path | None) -> ServiceSettings:
             raise ConfigurationError("service options must be a JSON object")
         data = loaded
 
-    sync_on_start_value = _option(
-        data, "sync_on_start", "WA_SYNERGY_SYNC_ON_START", True
-    )
-    if isinstance(sync_on_start_value, str):
-        sync_on_start = sync_on_start_value.casefold() not in {"0", "false", "no"}
-    else:
-        sync_on_start = bool(sync_on_start_value)
-
     return ServiceSettings(
         credentials=SynergyCredentials(
             email=str(_option(data, "email", "WA_SYNERGY_EMAIL", "")),
@@ -365,33 +373,27 @@ def _load_settings(options_path: Path | None) -> ServiceSettings:
         ),
         host=str(_option(data, "host", "WA_SYNERGY_HOST", "0.0.0.0")),
         port=int(_option(data, "port", "WA_SYNERGY_PORT", 8099)),
-        sync_hours=int(_option(data, "sync_hours", "WA_SYNERGY_SYNC_HOURS", 6)),
-        sync_retry_seconds=int(
-            _option(
-                data,
-                "sync_retry_seconds",
-                "WA_SYNERGY_SYNC_RETRY_SECONDS",
-                300,
-            )
-        ),
+        sync_time=_option(data, "sync_time", "WA_SYNERGY_SYNC_TIME", "06:10"),
         backfill_days=int(
             _option(data, "backfill_days", "WA_SYNERGY_BACKFILL_DAYS", 730)
         ),
         refresh_days=int(_option(data, "refresh_days", "WA_SYNERGY_REFRESH_DAYS", 30)),
-        sync_on_start=sync_on_start,
     )
 
 
 def _sync_loop(service: SynergyService, stop: threading.Event) -> None:
-    regular_delay = service.settings.sync_hours * 60 * 60
-    delay = 0 if service.settings.sync_on_start else regular_delay
-    while not stop.wait(delay):
-        try:
+    hour, minute = map(int, service.settings.sync_time.split(":"))
+    while not stop.is_set():
+        now = datetime.now(_PERTH)
+        scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if scheduled < now:
+            scheduled += timedelta(days=1)
+        _LOGGER.info("Next synchronization: %s", scheduled.isoformat())
+        if stop.wait((scheduled - now).total_seconds()):
+            return
+        # Provider errors are logged by sync; never retry before tomorrow.
+        with suppress(SynergyError):
             service.sync()
-        except SynergyError:
-            delay = service.settings.sync_retry_seconds
-        else:
-            delay = regular_delay
 
 
 def main() -> None:
